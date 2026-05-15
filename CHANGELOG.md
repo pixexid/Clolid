@@ -11,3 +11,4 @@ This project follows Semantic Versioning.
 - Added display sleep trigger for lid-close events.
 - Added settings, notifications, login item support, and About/Welcome windows.
 - Added Clolid app icon and menu-bar state icons.
+- Added GitHub Release packaging for downloadable app builds.

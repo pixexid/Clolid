@@ -1,8 +1,16 @@
 # Clolid
 
+<p align="center">
+  <img src="docs/assets/clolid-app-icon.png" alt="Clolid app icon" width="128">
+</p>
+
 Clolid is a lightweight macOS menu bar app for closed-lid desk setups. It keeps the Mac awake while the lid is closed and immediately asks macOS to sleep the built-in display when the lid-close event is detected.
 
 The app is intentionally small: it wraps the system power tools needed for this workflow instead of trying to replace a full power-management utility.
+
+<p align="center">
+  <img src="docs/assets/clolid-menu.jpeg" alt="Clolid menu bar popover" width="358">
+</p>
 
 ## Features
 
@@ -19,6 +27,12 @@ The app is intentionally small: it wraps the system power tools needed for this 
 - macOS 13 or newer.
 - Xcode command line tools.
 - Administrator permission when starting or stopping a session, because Clolid changes `pmset disablesleep`.
+
+## Download
+
+Download the latest `Clolid-*-macOS.zip` from the [GitHub Releases page](https://github.com/pixexid/Clolid/releases). Unzip it and move `Clolid.app` to `/Applications`.
+
+The app is currently distributed as an unsigned open-source build. On first launch, macOS may require opening it from Finder with Control-click -> Open.
 
 ## Build
 
@@ -39,6 +53,14 @@ For a quick launch check:
 ```bash
 ./script/build_and_run.sh --verify
 ```
+
+## Package a Release Build
+
+```bash
+./script/package_release.sh
+```
+
+The package script creates `dist/Clolid.app` and `releases/Clolid-<version>-macOS.zip` without launching the app. Attach that zip to the matching GitHub Release.
 
 ## How It Works
 
