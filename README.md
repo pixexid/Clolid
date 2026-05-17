@@ -21,6 +21,7 @@ The app is intentionally small: it wraps the system power tools needed for this 
 - Optional notifications for session start and lid-close display sleep.
 - Optional start-at-login LaunchAgent.
 - Settings for external-power requirement, polling interval, and menu-bar icon style.
+- Optional session-scoped Screen Lock policy using macOS `sysadminctl`.
 
 ## Requirements
 
@@ -77,6 +78,10 @@ While the session is running, Clolid polls `AppleClamshellState` through `ioreg`
 pmset displaysleepnow
 ```
 
+Clolid can also apply a session-scoped Screen Lock policy using `sysadminctl -screenLock`, which is the source that matches macOS Lock Screen settings on current macOS releases. The app asks for your Mac login password in a Clolid-styled prompt when a non-System Screen Lock policy is applied during a session, passes it to macOS for that command, and does not store it.
+
+Use `System` to leave the setting untouched. Use `No lock` only for trusted long-running local automation sessions where you accept that the user session stays unlocked while the display is off.
+
 When the session stops, Clolid terminates its own `caffeinate` process and restores:
 
 ```bash
@@ -93,6 +98,8 @@ If you ever need to restore normal sleep manually:
 sudo pmset -a disablesleep 0
 pkill caffeinate
 ```
+
+If Screen Lock was changed outside Clolid, configure “Require password after screen saver begins or display is turned off” in System Settings or check the effective value with `sysadminctl -screenLock status`.
 
 ## Project Layout
 

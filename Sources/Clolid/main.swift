@@ -7,7 +7,7 @@ import UserNotifications
 private enum AppConstants {
     static let appName = "Clolid"
     static let bundleIdentifier = "com.pixexid.Clolid"
-    static let marketingVersion = "0.1.0"
+    static let marketingVersion = "0.1.1"
 }
 
 private enum LidState: String {
@@ -50,9 +50,55 @@ private enum KeeperNotificationTone {
     case danger
 }
 
+private enum ScreenLockPolicy: String, CaseIterable, Identifiable {
+    case system = "System"
+    case immediate = "Immediate"
+    case fiveMinutes = "5 min"
+    case oneHour = "1 hour"
+    case fourHours = "4 hours"
+    case eightHours = "8 hours"
+    case noLock = "No lock"
+
+    var id: String {
+        rawValue
+    }
+
+    var sysadminValue: String? {
+        switch self {
+        case .system:
+            return nil
+        case .immediate:
+            return "immediate"
+        case .fiveMinutes:
+            return "300"
+        case .oneHour:
+            return "3600"
+        case .fourHours:
+            return "14400"
+        case .eightHours:
+            return "28800"
+        case .noLock:
+            return "off"
+        }
+    }
+
+    static func normalized(rawValue: String) -> ScreenLockPolicy {
+        switch rawValue {
+        case "12 hours", "16 hours", "24 hours":
+            return .noLock
+        default:
+            return ScreenLockPolicy(rawValue: rawValue) ?? .system
+        }
+    }
+}
+
 private struct CommandResult {
     let status: Int32
     let output: String
+}
+
+private struct ScreenLockSnapshot: Codable {
+    let status: String
 }
 
 private enum CommandError: LocalizedError {
@@ -99,6 +145,8 @@ private final class KeeperModel: ObservableObject {
     @Published private(set) var sleepDisabled = false
     @Published private(set) var externalDisplayName: String?
     @Published private(set) var isOnACPower = false
+    @Published private(set) var screenLockStatus = "Unknown"
+    @Published private(set) var isApplyingScreenLock = false
     @Published var lastDisplaySleepAt: Date?
     @Published var lastError: String?
     @Published var startAtLogin = false
@@ -112,10 +160,14 @@ private final class KeeperModel: ObservableObject {
     @AppStorage("ShowElapsedInMenuBar") var showElapsedInMenuBar = false
     @AppStorage("PollIntervalSeconds") var pollIntervalSeconds = 1.0
     @AppStorage("MenuBarIconStyle") var menuBarIconStyleRaw = MenuBarIconStyle.filled.rawValue
+    @AppStorage("ScreenLockPolicy") var screenLockPolicyRaw = ScreenLockPolicy.system.rawValue
 
     private let shell = Shell()
     private let loginItemManager = LoginItemManager()
     private let notificationManager = NotificationManager()
+    private let screenLockManager = ScreenLockManager()
+    private var isRefreshingScreenLockStatus = false
+    private var lastScreenLockRefreshAt: Date?
     private var caffeinateProcess: Process?
     private var pollTimer: Timer?
     private var startedAt: Date?
@@ -159,11 +211,56 @@ private final class KeeperModel: ObservableObject {
         }
     }
 
+    var screenLockPolicy: ScreenLockPolicy {
+        get {
+            ScreenLockPolicy.normalized(rawValue: screenLockPolicyRaw)
+        }
+        set {
+            updateScreenLockPolicy(newValue)
+        }
+    }
+
+    init() {
+        if let legacy = UserDefaults.standard.string(forKey: "ScreenLockDelay") {
+            let normalized = ScreenLockPolicy.normalized(rawValue: legacy)
+            screenLockPolicyRaw = normalized.rawValue
+            UserDefaults.standard.removeObject(forKey: "ScreenLockDelay")
+        } else {
+            let normalized = ScreenLockPolicy.normalized(rawValue: screenLockPolicyRaw)
+            if normalized.rawValue != screenLockPolicyRaw {
+                screenLockPolicyRaw = normalized.rawValue
+            }
+        }
+    }
+
     func refresh() {
         lidState = readLidState()
         sleepDisabled = readSleepDisabled()
         isOnACPower = readIsOnACPower()
         startAtLogin = loginItemManager.isEnabled
+        refreshScreenLockStatusIfNeeded()
+    }
+
+    func refreshScreenLockStatusIfNeeded(force: Bool = false) {
+        guard force || !isRefreshingScreenLockStatus else {
+            return
+        }
+        if !force, let lastScreenLockRefreshAt, Date().timeIntervalSince(lastScreenLockRefreshAt) < 10 {
+            return
+        }
+
+        isRefreshingScreenLockStatus = true
+        lastScreenLockRefreshAt = Date()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else {
+                return
+            }
+            let current = self.screenLockManager.currentStatus()
+            DispatchQueue.main.async {
+                self.screenLockStatus = current.label
+                self.isRefreshingScreenLockStatus = false
+            }
+        }
     }
 
     func refreshExternalDisplayIfNeeded(force: Bool = false) {
@@ -193,6 +290,45 @@ private final class KeeperModel: ObservableObject {
             return
         }
 
+        if screenLockPolicy != .system {
+            let policy = screenLockPolicy
+            isApplyingScreenLock = true
+            lastError = nil
+            PasswordPromptWindowController.shared.requestPassword(
+                title: "Start Session",
+                message: "Enter your Mac password to set Screen Lock before starting.",
+                actionTitle: "Start",
+                operation: { [weak self] password in
+                    guard let self else {
+                        return .failure(CommandError.failed("Clolid is not available."))
+                    }
+                    do {
+                        try self.screenLockManager.apply(policy, password: password)
+                        return .success("Screen Lock ready")
+                    } catch {
+                        return .failure(error)
+                    }
+                },
+                completion: { [weak self] success in
+                    guard let self else {
+                        return
+                    }
+                    guard success else {
+                        self.isApplyingScreenLock = false
+                        self.lastError = nil
+                        self.refresh()
+                        return
+                    }
+                    self.start(password: nil)
+                }
+            )
+            return
+        }
+
+        start(password: nil)
+    }
+
+    private func start(password: String?) {
         do {
             cleanupStaleCaffeinate()
             refresh()
@@ -200,10 +336,12 @@ private final class KeeperModel: ObservableObject {
                 throw CommandError.failed("External power is required by your settings.")
             }
             try setClamshellSleepDisabled(true)
+            try screenLockManager.apply(screenLockPolicy, password: password)
             try startCaffeinate()
             startedAt = Date()
             lastObservedLidState = readLidState()
             isRunning = true
+            isApplyingScreenLock = false
             lastError = nil
             startPolling()
             refresh()
@@ -224,6 +362,7 @@ private final class KeeperModel: ObservableObject {
                 tone: .danger
             )
             refresh()
+            isApplyingScreenLock = false
         }
     }
 
@@ -232,6 +371,7 @@ private final class KeeperModel: ObservableObject {
         stopCaffeinate()
 
         do {
+            try screenLockManager.restoreIfNeeded()
             try setClamshellSleepDisabled(false)
             lastError = nil
         } catch {
@@ -253,6 +393,7 @@ private final class KeeperModel: ObservableObject {
         do {
             stopPolling()
             stopCaffeinate()
+            try screenLockManager.restoreIfNeeded()
             try setClamshellSleepDisabled(false)
             isRunning = false
             startedAt = nil
@@ -283,6 +424,77 @@ private final class KeeperModel: ObservableObject {
         pollIntervalSeconds = interval
         if isRunning {
             startPolling()
+        }
+    }
+
+    func updateScreenLockPolicy(_ policy: ScreenLockPolicy) {
+        guard isRunning else {
+            screenLockPolicyRaw = policy.rawValue
+            refresh()
+            return
+        }
+
+        isApplyingScreenLock = true
+        lastError = nil
+
+        if policy == .system {
+            applyScreenLockPolicy(policy, password: nil)
+            return
+        }
+
+        PasswordPromptWindowController.shared.requestPassword(
+            title: "Set Screen Lock",
+            message: "Enter your Mac password to set \(policy.rawValue).",
+            actionTitle: "Set",
+            operation: { [weak self] password in
+                guard let self else {
+                    return .failure(CommandError.failed("Clolid is not available."))
+                }
+                do {
+                    try self.screenLockManager.apply(policy, password: password)
+                    return .success("Set to \(self.screenLockManager.statusLabel())")
+                } catch {
+                    return .failure(error)
+                }
+            },
+            completion: { [weak self] success in
+                guard let self else {
+                    return
+                }
+                if success {
+                    self.screenLockPolicyRaw = policy.rawValue
+                    self.lastError = nil
+                }
+                self.isApplyingScreenLock = false
+                self.refresh()
+            }
+        )
+    }
+
+    private func applyScreenLockPolicy(_ policy: ScreenLockPolicy, password: String?) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else {
+                return
+            }
+            let result: Result<Void, Error>
+            do {
+                try self.screenLockManager.apply(policy, password: password)
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    self.screenLockPolicyRaw = policy.rawValue
+                    self.lastError = nil
+                case .failure(let error):
+                    self.lastError = error.localizedDescription
+                }
+                self.isApplyingScreenLock = false
+                self.refresh()
+            }
         }
     }
 
@@ -446,6 +658,145 @@ private final class KeeperModel: ObservableObject {
     }
 }
 
+private final class ScreenLockManager {
+    private let shell = Shell()
+    private var sessionPassword: String?
+
+    private var snapshotURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/Clolid/screen-lock-snapshot.json")
+    }
+
+    func apply(_ policy: ScreenLockPolicy, password: String?) throws {
+        guard let value = policy.sysadminValue else {
+            try restoreIfNeeded()
+            return
+        }
+
+        if !FileManager.default.fileExists(atPath: snapshotURL.path) {
+            try saveSnapshot()
+        }
+
+        try runScreenLock(value, password: password)
+    }
+
+    func restoreIfNeeded() throws {
+        guard let snapshot = savedSnapshot() else {
+            return
+        }
+
+        if let value = sysadminValue(from: snapshot.status) {
+            try runScreenLock(value, password: nil)
+        }
+        try? FileManager.default.removeItem(at: snapshotURL)
+    }
+
+    func statusLabel() -> String {
+        currentStatus().label
+    }
+
+    func currentStatus() -> (label: String, policy: ScreenLockPolicy?) {
+        let status = screenLockStatus()
+        if status.contains("off") {
+            return ("Off", .noLock)
+        }
+        if status.contains("immediate") {
+            return ("Immediate", .immediate)
+        }
+        if let seconds = status.split(separator: " ").compactMap({ Int($0) }).first {
+            if seconds >= 3_600, seconds % 3_600 == 0 {
+                let label = "\(seconds / 3_600)h"
+                return (label, policy(for: seconds))
+            }
+            if seconds >= 60, seconds % 60 == 0 {
+                let label = "\(seconds / 60)m"
+                return (label, policy(for: seconds))
+            }
+            return ("\(seconds)s", policy(for: seconds))
+        }
+        return ("Unknown", nil)
+    }
+
+    private func policy(for seconds: Int) -> ScreenLockPolicy? {
+        switch seconds {
+        case 300:
+            return .fiveMinutes
+        case 3_600:
+            return .oneHour
+        case 14_400:
+            return .fourHours
+        case 28_800:
+            return .eightHours
+        default:
+            return nil
+        }
+    }
+
+    private func saveSnapshot() throws {
+        let snapshot = ScreenLockSnapshot(status: screenLockStatus())
+        try FileManager.default.createDirectory(
+            at: snapshotURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let data = try JSONEncoder().encode(snapshot)
+        try data.write(to: snapshotURL, options: .atomic)
+    }
+
+    private func savedSnapshot() -> ScreenLockSnapshot? {
+        guard let data = try? Data(contentsOf: snapshotURL) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(ScreenLockSnapshot.self, from: data)
+    }
+
+    private func screenLockStatus() -> String {
+        let result = try? shell.run("/usr/sbin/sysadminctl", ["-screenLock", "status"])
+        return result?.output.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private func sysadminValue(from status: String) -> String? {
+        if status.contains("off") {
+            return "off"
+        }
+        if status.contains("immediate") {
+            return "immediate"
+        }
+        if let seconds = status.split(separator: " ").compactMap({ Int($0) }).first {
+            return "\(seconds)"
+        }
+        return nil
+    }
+
+    private func runScreenLock(_ value: String, password newPassword: String?) throws {
+        guard let password = newPassword ?? sessionPassword else {
+            throw CommandError.failed("Mac login password is required to change Screen Lock.")
+        }
+        sessionPassword = password
+
+        let process = Process()
+        let outputPipe = Pipe()
+        let inputPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/sysadminctl")
+        process.arguments = ["-screenLock", value, "-password", "-"]
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+        process.standardInput = inputPipe
+
+        try process.run()
+        inputPipe.fileHandleForWriting.write(Data((password + "\n").utf8))
+        try? inputPipe.fileHandleForWriting.close()
+        process.waitUntilExit()
+
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: outputData, encoding: .utf8) ?? ""
+        if process.terminationStatus != 0 || output.localizedCaseInsensitiveContains("error") {
+            sessionPassword = nil
+            throw CommandError.failed(output.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+}
+
 private final class LoginItemManager {
     private let shell = Shell()
     private let label = "com.pixexid.Clolid.login"
@@ -502,6 +853,331 @@ private final class LoginItemManager {
     }
 }
 
+private enum PasswordPromptPhase {
+    case entry
+    case applying
+    case success(String)
+    case failure(String)
+}
+
+private final class PasswordPromptState: ObservableObject {
+    let title: String
+    let message: String
+    let actionTitle: String
+    @Published var password = ""
+    @Published var phase = PasswordPromptPhase.entry
+
+    init(title: String, message: String, actionTitle: String) {
+        self.title = title
+        self.message = message
+        self.actionTitle = actionTitle
+    }
+
+    var isApplying: Bool {
+        if case .applying = phase {
+            return true
+        }
+        return false
+    }
+
+    var canSubmit: Bool {
+        !password.isEmpty && !isApplying
+    }
+}
+
+private final class PasswordPromptWindowController: NSObject {
+    static let shared = PasswordPromptWindowController()
+    private var window: NSWindow?
+    private var state: PasswordPromptState?
+    private var operation: ((String) -> Result<String, Error>)?
+    private var completion: ((Bool) -> Void)?
+
+    func requestPassword(
+        title: String,
+        message: String,
+        actionTitle: String,
+        operation: @escaping (String) -> Result<String, Error>,
+        completion: @escaping (Bool) -> Void
+    ) {
+        if window != nil {
+            window?.makeKeyAndOrderFront(nil)
+            window?.orderFrontRegardless()
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        show(
+            title: title,
+            message: message,
+            actionTitle: actionTitle,
+            operation: operation,
+            completion: completion
+        )
+    }
+
+    private func show(
+        title: String,
+        message: String,
+        actionTitle: String,
+        operation: @escaping (String) -> Result<String, Error>,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let state = PasswordPromptState(title: title, message: message, actionTitle: actionTitle)
+        self.state = state
+        self.operation = operation
+        self.completion = completion
+        let controller = NSHostingController(rootView: ScreenLockPasswordView(
+            state: state,
+            submit: { [weak self] password in
+                self?.submit(password)
+            },
+            cancel: { [weak self] in
+                self?.finish(success: false)
+            }
+        ))
+        let window = NSPanel(contentViewController: controller)
+        window.title = "Screen Lock"
+        window.setContentSize(NSSize(width: 440, height: 312))
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false
+        window.level = .modalPanel
+        window.collectionBehavior = [.transient, .ignoresCycle]
+        window.delegate = self
+        self.window = window
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func submit(_ password: String) {
+        guard let state, let operation, state.canSubmit else {
+            return
+        }
+
+        state.phase = .applying
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = operation(password)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.state === state else {
+                    return
+                }
+                switch result {
+                case .success(let message):
+                    state.password = ""
+                    state.phase = .success(message)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.95) { [weak self] in
+                        guard self?.state === state else {
+                            return
+                        }
+                        self?.finish(success: true)
+                    }
+                case .failure(let error):
+                    state.phase = .failure(error.localizedDescription)
+                }
+            }
+        }
+    }
+}
+
+extension PasswordPromptWindowController: NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        finish(success: false)
+    }
+
+    private func finish(success: Bool) {
+        let completion = completion
+        self.completion = nil
+        operation = nil
+        state = nil
+        window?.delegate = nil
+        window?.close()
+        window = nil
+        completion?(success)
+    }
+}
+
+private struct ScreenLockPasswordView: View {
+    @ObservedObject var state: PasswordPromptState
+    @FocusState private var isPasswordFocused: Bool
+    let submit: (String) -> Void
+    let cancel: () -> Void
+
+    private let accent = Color(red: 0.24, green: 0.62, blue: 0.36)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                phaseBadge
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(state.title)
+                        .font(.system(size: 16, weight: .bold))
+                    Text(subtitle)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Mac login password")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                passwordField
+                feedbackLine
+            }
+
+            Spacer()
+
+            HStack {
+                Button("Cancel") {
+                    cancel()
+                }
+                .disabled(state.isApplying)
+                Spacer()
+                Button(actionTitle) {
+                    submit(state.password)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!state.canSubmit)
+            }
+        }
+        .padding(24)
+        .frame(width: 440, height: 312)
+        .animation(.easeOut(duration: 0.18), value: state.password.isEmpty)
+        .onAppear {
+            DispatchQueue.main.async {
+                isPasswordFocused = true
+            }
+        }
+        .onChange(of: state.password) { _ in
+            if case .failure = state.phase {
+                state.phase = .entry
+            }
+        }
+    }
+
+    private var phaseBadge: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(badgeColor.opacity(0.14))
+            phaseIcon
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(badgeColor)
+        }
+        .frame(width: 48, height: 48)
+    }
+
+    @ViewBuilder
+    private var phaseIcon: some View {
+        switch state.phase {
+        case .entry:
+            Image(systemName: "lock.shield")
+        case .applying:
+            ProgressView()
+                .controlSize(.small)
+        case .success:
+            Image(systemName: "checkmark.circle.fill")
+        case .failure:
+            Image(systemName: "exclamationmark.triangle.fill")
+        }
+    }
+
+    private var badgeColor: Color {
+        switch state.phase {
+        case .entry, .applying:
+            return accent
+        case .success:
+            return accent
+        case .failure:
+            return Color(red: 0.86, green: 0.18, blue: 0.14)
+        }
+    }
+
+    private var subtitle: String {
+        switch state.phase {
+        case .entry:
+            return state.message
+        case .applying:
+            return "Applying with macOS..."
+        case .success:
+            return "Done."
+        case .failure:
+            return "Check the password and try again."
+        }
+    }
+
+    private var passwordField: some View {
+        SecureField("Required", text: $state.password)
+            .textFieldStyle(.plain)
+            .font(.system(size: 15))
+            .padding(.horizontal, 12)
+            .frame(height: 42)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color(nsColor: .textBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(fieldBorderColor, lineWidth: isPasswordFocused ? 1.6 : 1)
+            )
+            .shadow(color: isPasswordFocused ? accent.opacity(0.22) : .clear, radius: 8, y: 2)
+            .focused($isPasswordFocused)
+            .disabled(state.isApplying)
+            .onSubmit {
+                submit(state.password)
+            }
+            .animation(.easeOut(duration: 0.16), value: isPasswordFocused)
+    }
+
+    private var fieldBorderColor: Color {
+        if case .failure = state.phase {
+            return Color(red: 0.86, green: 0.18, blue: 0.14)
+        }
+        return isPasswordFocused ? accent : Color.secondary.opacity(0.26)
+    }
+
+    @ViewBuilder
+    private var feedbackLine: some View {
+        switch state.phase {
+        case .entry:
+            HStack(spacing: 6) {
+                Image(systemName: state.password.isEmpty ? "arrow.up.left.and.arrow.down.right" : "checkmark")
+                    .font(.system(size: 10, weight: .bold))
+                Text(state.password.isEmpty ? "Type your Mac password to continue." : "Ready to apply.")
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(state.password.isEmpty ? Color.secondary : accent)
+        case .applying:
+            Text("Keeping this open while macOS applies the change.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        case .success(let message):
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 10, weight: .bold))
+                Text(message)
+            }
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(accent)
+        case .failure(let message):
+            Text(message.isEmpty ? "Password was not accepted." : message)
+                .font(.system(size: 12))
+                .foregroundStyle(Color(red: 0.86, green: 0.18, blue: 0.14))
+                .lineLimit(2)
+        }
+    }
+
+    private var actionTitle: String {
+        switch state.phase {
+        case .entry, .failure:
+            return state.actionTitle
+        case .applying:
+            return "Applying"
+        case .success:
+            return "Done"
+        }
+    }
+}
+
 private final class NotificationManager {
     private let center = UNUserNotificationCenter.current()
     private var lastNotificationByTitle: [String: Date] = [:]
@@ -549,13 +1225,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     private let statusItem = NSStatusBar.system.statusItem(withLength: 36)
     private let popover = NSPopover()
     private var cancellables = Set<AnyCancellable>()
-    private var eventMonitor: Any?
+    private var keyboardMonitor: Any?
+    private var outsideClickMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         configurePopover()
         configureStatusItem()
         model.refresh()
+        model.refreshScreenLockStatusIfNeeded(force: true)
 
         model.objectWillChange
             .receive(on: RunLoop.main)
@@ -590,6 +1268,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        stopOutsideClickMonitor()
+        if let keyboardMonitor {
+            NSEvent.removeMonitor(keyboardMonitor)
+            self.keyboardMonitor = nil
+        }
         if model.isRunning {
             model.stop()
         }
@@ -599,13 +1282,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         popover.behavior = .transient
         popover.animates = true
         popover.delegate = self
-        popover.contentSize = NSSize(width: 320, height: 560)
+        popover.contentSize = NSSize(width: 320, height: 520)
         popover.contentViewController = NSHostingController(rootView: KeeperPanelView(
             model: model,
             closePopover: { [weak self] in
-                self?.popover.performClose(nil)
+                self?.closePopover()
+            },
+            closePopoverThen: { [weak self] action in
+                self?.closePopover()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: action)
             }
         ))
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        stopOutsideClickMonitor()
     }
 
     private func configureStatusItem() {
@@ -652,17 +1343,69 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         }
 
         if popover.isShown {
-            popover.performClose(nil)
+            closePopover()
         } else {
             model.refresh()
+            model.refreshScreenLockStatusIfNeeded(force: true)
             model.refreshExternalDisplayIfNeeded()
             refreshStatusIcon()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            startOutsideClickMonitor()
         }
     }
 
+    private func closePopover() {
+        stopOutsideClickMonitor()
+        popover.performClose(nil)
+    }
+
+    private func startOutsideClickMonitor() {
+        stopOutsideClickMonitor()
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            DispatchQueue.main.async {
+                self?.closePopoverIfClickIsOutside(event)
+            }
+        }
+    }
+
+    private func stopOutsideClickMonitor() {
+        if let outsideClickMonitor {
+            NSEvent.removeMonitor(outsideClickMonitor)
+            self.outsideClickMonitor = nil
+        }
+    }
+
+    private func closePopoverIfClickIsOutside(_ event: NSEvent) {
+        guard popover.isShown else {
+            stopOutsideClickMonitor()
+            return
+        }
+        guard let window = popover.contentViewController?.view.window else {
+            closePopover()
+            return
+        }
+
+        let clickPoint = event.locationInWindow
+        let popoverFrame = window.frame
+        let statusFrame = statusItemButtonScreenFrame()
+        if !popoverFrame.contains(clickPoint) && !statusFrame.contains(clickPoint) {
+            closePopover()
+        }
+    }
+
+    private func statusItemButtonScreenFrame() -> NSRect {
+        guard let button = statusItem.button,
+              let window = button.window
+        else {
+            return .zero
+        }
+
+        let buttonFrame = button.convert(button.bounds, to: nil)
+        return window.convertToScreen(buttonFrame)
+    }
+
     private func configureKeyboardShortcuts() {
-        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else {
                 return event
             }
@@ -683,7 +1426,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
             }
 
             if commandOnly && key == "," {
-                self.popover.performClose(nil)
+                self.closePopover()
                 SettingsWindowController.shared.show(model: self.model)
                 return nil
             }
@@ -770,6 +1513,7 @@ private enum StatusIconFactory {
 private struct KeeperPanelView: View {
     @ObservedObject var model: KeeperModel
     let closePopover: () -> Void
+    let closePopoverThen: (@escaping () -> Void) -> Void
     @Environment(\.colorScheme) private var colorScheme
 
     private var active: Bool {
@@ -785,47 +1529,64 @@ private struct KeeperPanelView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            actionButton
-            sectionLabel("Status")
-            statusRow(icon: "power", label: "Session", value: active ? "Running" : "Stopped", tint: active ? colors.accent : colors.text)
-            statusRow(icon: "laptopcomputer", label: "Lid", value: model.lidState.title, tint: lidClosed ? colors.warn : colors.text)
-            statusRow(icon: "moon", label: "Lid awake", value: model.sleepDisabled ? "On" : "Off", tint: model.sleepDisabled ? colors.accent : colors.dim)
-            statusRow(icon: "display", label: "Display", value: model.externalDisplayName ?? "-", tint: colors.dim)
-            statusRow(icon: "bolt.fill", label: "Power", value: model.isOnACPower ? "AC Power" : "Battery", tint: model.requireExternalPower && !model.isOnACPower ? colors.warn : colors.dim)
-            if let lastDisplaySleepAt = model.lastDisplaySleepAt {
-                statusRow(icon: "clock", label: "Last display sleep", value: relativeTime(lastDisplaySleepAt), tint: colors.dim)
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(spacing: 0) {
+                header
+                actionButton
+                sectionLabel("Status")
+                statusRow(icon: "power", label: "Session", value: active ? "Running" : "Stopped", tint: active ? colors.accent : colors.text)
+                statusRow(icon: "laptopcomputer", label: "Lid", value: model.lidState.title, tint: lidClosed ? colors.warn : colors.text)
+                statusRow(icon: "moon", label: "Lid awake", value: model.sleepDisabled ? "On" : "Off", tint: model.sleepDisabled ? colors.accent : colors.dim)
+                statusRow(icon: "display", label: "Display", value: model.externalDisplayName ?? "-", tint: colors.dim)
+                statusRow(icon: "bolt.fill", label: "Power", value: model.isOnACPower ? "AC Power" : "Battery", tint: model.requireExternalPower && !model.isOnACPower ? colors.warn : colors.dim)
+                statusRow(icon: "lock", label: "Screen lock", value: model.screenLockStatus, tint: model.screenLockPolicy == .system ? colors.dim : colors.accent)
+                if let lastDisplaySleepAt = model.lastDisplaySleepAt {
+                    statusRow(icon: "clock", label: "Last display sleep", value: relativeTime(lastDisplaySleepAt), tint: colors.dim)
+                }
+                if let lastError = model.lastError {
+                    noticeRow(text: lastError)
+                }
+                divider
+                menuButton(icon: "moon.zzz", label: "Sleep display now", shortcut: "⌘⇧L") {
+                    model.displaySleepNow()
+                }
+                divider
+                sectionLabel("Preferences")
+                toggleRow(label: "Start at login", isOn: Binding(
+                    get: { model.startAtLogin },
+                    set: { model.setStartAtLogin($0) }
+                ))
+                toggleRow(label: "Auto-start session", isOn: $model.startSessionOnLaunch)
+                pickerRow(label: "Screen lock", selection: Binding(
+                    get: { model.screenLockPolicy },
+                    set: { policy in
+                        if model.isRunning, policy != .system {
+                            closePopoverThen {
+                                model.updateScreenLockPolicy(policy)
+                            }
+                        } else {
+                            model.updateScreenLockPolicy(policy)
+                        }
+                    }
+                ))
+                divider
+                menuButton(icon: "gearshape", label: "Settings...", shortcut: "⌘,") {
+                    closePopover()
+                    SettingsWindowController.shared.show(model: model)
+                }
+                menuButton(icon: "info.circle", label: "About") {
+                    closePopover()
+                    AboutWindowController.shared.show()
+                }
+                menuButton(icon: "rectangle.portrait.and.arrow.right", label: "Quit", shortcut: "⌘Q", danger: true) {
+                    NSApp.terminate(nil)
+                }
             }
-            if let lastError = model.lastError {
-                noticeRow(text: lastError)
-            }
-            divider
-            menuButton(icon: "moon.zzz", label: "Sleep display now", shortcut: "⌘⇧L") {
-                model.displaySleepNow()
-            }
-            divider
-            sectionLabel("Preferences")
-            toggleRow(label: "Start at login", isOn: Binding(
-                get: { model.startAtLogin },
-                set: { model.setStartAtLogin($0) }
-            ))
-            toggleRow(label: "Auto-start session", isOn: $model.startSessionOnLaunch)
-            divider
-            menuButton(icon: "gearshape", label: "Settings...", shortcut: "⌘,") {
-                closePopover()
-                SettingsWindowController.shared.show(model: model)
-            }
-            menuButton(icon: "info.circle", label: "About") {
-                closePopover()
-                AboutWindowController.shared.show()
-            }
-            menuButton(icon: "rectangle.portrait.and.arrow.right", label: "Quit", shortcut: "⌘Q", danger: true) {
-                NSApp.terminate(nil)
-            }
+            .padding(.bottom, 6)
+            .frame(width: 320)
         }
-        .padding(.bottom, 6)
         .frame(width: 320)
+        .frame(maxHeight: 520)
         .background(colors.surface)
     }
 
@@ -857,12 +1618,12 @@ private struct KeeperPanelView: View {
                 .foregroundStyle(colors.dim)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.vertical, 10)
         .background(headerBackground)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .padding(.horizontal, 8)
-        .padding(.top, 8)
-        .padding(.bottom, 4)
+        .padding(.top, 7)
+        .padding(.bottom, 3)
     }
 
     private var actionButton: some View {
@@ -913,7 +1674,7 @@ private struct KeeperPanelView: View {
                 .foregroundStyle(tint)
         }
         .padding(.horizontal, 18)
-        .padding(.vertical, 5)
+        .padding(.vertical, 4)
     }
 
     private func noticeRow(text: String) -> some View {
@@ -929,7 +1690,7 @@ private struct KeeperPanelView: View {
             Spacer()
         }
         .padding(.horizontal, 18)
-        .padding(.vertical, 6)
+        .padding(.vertical, 5)
     }
 
     private func relativeTime(_ date: Date) -> String {
@@ -937,7 +1698,10 @@ private struct KeeperPanelView: View {
         if seconds < 60 {
             return "\(seconds)s ago"
         }
-        return "\(seconds / 60)m ago"
+        if seconds < 3_600 {
+            return "\(seconds / 60)m ago"
+        }
+        return "\(seconds / 3_600)h ago"
     }
 
     private func sectionLabel(_ text: String) -> some View {
@@ -950,8 +1714,8 @@ private struct KeeperPanelView: View {
             Spacer()
         }
         .padding(.horizontal, 18)
-        .padding(.top, 10)
-        .padding(.bottom, 4)
+        .padding(.top, 8)
+        .padding(.bottom, 3)
     }
 
     private func menuButton(icon: String, label: String, shortcut: String? = nil, danger: Bool = false, action: @escaping () -> Void) -> some View {
@@ -969,7 +1733,7 @@ private struct KeeperPanelView: View {
                 }
             }
             .padding(.horizontal, 12)
-            .frame(height: 31)
+            .frame(height: 29)
             .foregroundStyle(danger ? colors.danger : colors.text)
             .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
@@ -987,7 +1751,31 @@ private struct KeeperPanelView: View {
                 .accessibilityLabel(label)
         }
         .padding(.horizontal, 18)
-        .padding(.vertical, 5)
+        .padding(.vertical, 4)
+    }
+
+    private func pickerRow(label: String, selection: Binding<ScreenLockPolicy>) -> some View {
+        HStack(spacing: 10) {
+            Text(label)
+                .font(.system(size: 13))
+                .foregroundStyle(colors.text)
+            Spacer()
+            if model.isApplyingScreenLock {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 112, alignment: .trailing)
+            } else {
+                Picker("", selection: selection) {
+                    ForEach(ScreenLockPolicy.allCases) { policy in
+                        Text(policy.rawValue).tag(policy)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 112)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 4)
     }
 
     private var divider: some View {
@@ -995,7 +1783,7 @@ private struct KeeperPanelView: View {
             .fill(colors.divider)
             .frame(height: 1)
             .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .padding(.vertical, 4)
     }
 
     private func key(_ value: String, inverted: Bool = false) -> some View {
@@ -1072,6 +1860,7 @@ private struct KeeperPanelView: View {
         }
         return colors.surfaceAlt
     }
+
 }
 
 private struct PanelColors {
@@ -1449,6 +2238,21 @@ private struct SettingsView: View {
                 }
                 .labelsHidden()
                 .frame(width: 92)
+            }
+            settingsRow(
+                title: "Screen lock",
+                subtitle: "Uses macOS sysadminctl."
+            ) {
+                Picker("", selection: Binding(
+                    get: { model.screenLockPolicy },
+                    set: { model.screenLockPolicy = $0 }
+                )) {
+                    ForEach(ScreenLockPolicy.allCases) { policy in
+                        Text(policy.rawValue).tag(policy)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 124)
             }
 
             settingsSection("Behavior")
