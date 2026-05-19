@@ -4,6 +4,13 @@ All notable changes to Clolid will be documented in this file.
 
 This project follows Semantic Versioning.
 
+## 0.1.2 - 2026-05-19
+
+- Reduced idle resource use by removing continuous shell-backed status polling while the menu is closed.
+- Reduced active-session polling to lid-state checks, with slower power-source and display-detail refreshes.
+- Removed the `caffeinate -u` user-active assertion to avoid unnecessary display/user-activity pressure.
+- Replaced active lid polling with native IOKit reads and clamped invalid poll interval values.
+
 ## 0.1.1 - 2026-05-17
 
 - Constrained the menu to avoid screen-edge overflow.

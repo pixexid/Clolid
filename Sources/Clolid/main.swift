@@ -1,13 +1,14 @@
 import AppKit
 import Combine
 import Foundation
+import IOKit
 import SwiftUI
 import UserNotifications
 
 private enum AppConstants {
     static let appName = "Clolid"
     static let bundleIdentifier = "com.pixexid.Clolid"
-    static let marketingVersion = "0.1.1"
+    static let marketingVersion = "0.1.2"
 }
 
 private enum LidState: String {
@@ -158,7 +159,7 @@ private final class KeeperModel: ObservableObject {
     @AppStorage("NotifyOnSessionStart") var notifyOnSessionStart = true
     @AppStorage("RequireExternalPower") var requireExternalPower = false
     @AppStorage("ShowElapsedInMenuBar") var showElapsedInMenuBar = false
-    @AppStorage("PollIntervalSeconds") var pollIntervalSeconds = 1.0
+    @AppStorage("PollIntervalSeconds") var pollIntervalSeconds = 2.0
     @AppStorage("MenuBarIconStyle") var menuBarIconStyleRaw = MenuBarIconStyle.filled.rawValue
     @AppStorage("ScreenLockPolicy") var screenLockPolicyRaw = ScreenLockPolicy.system.rawValue
 
@@ -173,8 +174,10 @@ private final class KeeperModel: ObservableObject {
     private var startedAt: Date?
     private var lastObservedLidState = LidState.unknown
     private var lastNoExternalDisplayNotificationAt: Date?
+    private var lastPowerSourceCheckAt: Date?
     private var lastDisplayRefreshAt: Date?
     private var isRefreshingDisplays = false
+    private var isRefreshingStatus = false
     private var caffeinatePIDURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Caches/Clolid/caffeinate.pid")
@@ -231,6 +234,9 @@ private final class KeeperModel: ObservableObject {
                 screenLockPolicyRaw = normalized.rawValue
             }
         }
+        if pollIntervalSeconds < 1.0 {
+            pollIntervalSeconds = 2.0
+        }
     }
 
     func refresh() {
@@ -239,6 +245,45 @@ private final class KeeperModel: ObservableObject {
         isOnACPower = readIsOnACPower()
         startAtLogin = loginItemManager.isEnabled
         refreshScreenLockStatusIfNeeded()
+    }
+
+    func refreshStatusIfNeeded(force: Bool = false) {
+        guard force || !isRefreshingStatus else {
+            return
+        }
+
+        isRefreshingStatus = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else {
+                return
+            }
+            let currentLidState = self.readLidState()
+            let currentSleepDisabled = self.readSleepDisabled()
+            let currentPowerSource = self.readIsOnACPower()
+            let currentStartAtLogin = self.loginItemManager.isEnabled
+
+            DispatchQueue.main.async {
+                self.lidState = currentLidState
+                self.sleepDisabled = currentSleepDisabled
+                self.isOnACPower = currentPowerSource
+                self.startAtLogin = currentStartAtLogin
+                self.isRefreshingStatus = false
+                self.refreshScreenLockStatusIfNeeded(force: force)
+            }
+        }
+    }
+
+    func prepareIdlePowerState() {
+        guard !isRunning else {
+            return
+        }
+
+        stopPolling()
+        stopCaffeinate()
+        if readSleepDisabled() {
+            _ = shell.runSuccessful("/usr/bin/sudo", ["-n", "/usr/bin/pmset", "-a", "disablesleep", "0"])
+        }
+        sleepDisabled = readSleepDisabled()
     }
 
     func refreshScreenLockStatusIfNeeded(force: Bool = false) {
@@ -264,7 +309,7 @@ private final class KeeperModel: ObservableObject {
     }
 
     func refreshExternalDisplayIfNeeded(force: Bool = false) {
-        guard force || lastDisplayRefreshAt.map({ Date().timeIntervalSince($0) > 15 }) ?? true else {
+        guard force || lastDisplayRefreshAt.map({ Date().timeIntervalSince($0) > 60 }) ?? true else {
             return
         }
         guard !isRefreshingDisplays else {
@@ -340,6 +385,8 @@ private final class KeeperModel: ObservableObject {
             try startCaffeinate()
             startedAt = Date()
             lastObservedLidState = readLidState()
+            lidState = lastObservedLidState
+            sleepDisabled = true
             isRunning = true
             isApplyingScreenLock = false
             lastError = nil
@@ -380,6 +427,7 @@ private final class KeeperModel: ObservableObject {
 
         isRunning = false
         startedAt = nil
+        sleepDisabled = false
         refresh()
     }
 
@@ -397,6 +445,7 @@ private final class KeeperModel: ObservableObject {
             try setClamshellSleepDisabled(false)
             isRunning = false
             startedAt = nil
+            sleepDisabled = false
             lastError = nil
             refresh()
         } catch {
@@ -421,7 +470,7 @@ private final class KeeperModel: ObservableObject {
     }
 
     func updatePollInterval(_ interval: Double) {
-        pollIntervalSeconds = interval
+        pollIntervalSeconds = max(interval, 1.0)
         if isRunning {
             startPolling()
         }
@@ -501,7 +550,7 @@ private final class KeeperModel: ObservableObject {
     private func startCaffeinate() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        process.arguments = ["-i", "-s", "-u"]
+        process.arguments = ["-i", "-s"]
         try process.run()
         caffeinateProcess = process
         try FileManager.default.createDirectory(
@@ -532,7 +581,7 @@ private final class KeeperModel: ObservableObject {
 
     private func startPolling() {
         pollTimer?.invalidate()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: pollIntervalSeconds, repeats: true) { [weak self] _ in
+        pollTimer = Timer.scheduledTimer(withTimeInterval: max(pollIntervalSeconds, 1.0), repeats: true) { [weak self] _ in
             self?.poll()
         }
         RunLoop.main.add(pollTimer!, forMode: .common)
@@ -545,10 +594,16 @@ private final class KeeperModel: ObservableObject {
     }
 
     private func poll() {
+        guard isRunning else {
+            stopPolling()
+            return
+        }
+
         let currentLidState = readLidState()
         let lidJustClosed = currentLidState == .closed && lastObservedLidState != .closed
+        lidState = currentLidState
 
-        if isRunning && lidJustClosed {
+        if lidJustClosed {
             if sleepDisplayOnLidClose {
                 displaySleepNow()
             }
@@ -561,18 +616,21 @@ private final class KeeperModel: ObservableObject {
             }
         }
 
-        if isRunning && requireExternalPower && !readIsOnACPower() {
-            lastError = "External power disconnected while session was running."
-            notificationManager.post(
-                title: "Power unplugged",
-                body: "Session stopped.",
-                tone: .warn
-            )
-            stop()
-            return
+        if requireExternalPower && shouldRefreshPowerSource() {
+            isOnACPower = readIsOnACPower()
+            if !isOnACPower {
+                lastError = "External power disconnected while session was running."
+                notificationManager.post(
+                    title: "Power unplugged",
+                    body: "Session stopped.",
+                    tone: .warn
+                )
+                stop()
+                return
+            }
         }
 
-        if isRunning && currentLidState == .closed && externalDisplayName == nil {
+        if currentLidState == .closed && externalDisplayName == nil {
             let shouldNotify = lastNoExternalDisplayNotificationAt.map { Date().timeIntervalSince($0) > 600 } ?? true
             if shouldNotify {
                 lastNoExternalDisplayNotificationAt = Date()
@@ -585,11 +643,24 @@ private final class KeeperModel: ObservableObject {
         }
 
         lastObservedLidState = currentLidState
-        refresh()
-        refreshExternalDisplayIfNeeded()
+        if currentLidState == .closed {
+            refreshExternalDisplayIfNeeded()
+        }
+    }
+
+    private func shouldRefreshPowerSource() -> Bool {
+        let now = Date()
+        defer {
+            lastPowerSourceCheckAt = now
+        }
+        return lastPowerSourceCheckAt.map { now.timeIntervalSince($0) > 5 } ?? true
     }
 
     private func readLidState() -> LidState {
+        if let nativeState = readNativeLidState() {
+            return nativeState
+        }
+
         let result = try? shell.run("/usr/sbin/ioreg", ["-r", "-k", "AppleClamshellState", "-d", "1"])
         guard let output = result?.output else {
             return .unknown
@@ -605,6 +676,33 @@ private final class KeeperModel: ObservableObject {
         }
 
         return .unknown
+    }
+
+    private func readNativeLidState() -> LidState? {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        guard service != 0 else {
+            return nil
+        }
+        defer {
+            IOObjectRelease(service)
+        }
+
+        guard let value = IORegistryEntryCreateCFProperty(
+            service,
+            "AppleClamshellState" as CFString,
+            kCFAllocatorDefault,
+            0
+        )?.takeRetainedValue() else {
+            return nil
+        }
+
+        if let number = value as? NSNumber {
+            return number.boolValue ? .closed : .open
+        }
+        if let bool = value as? Bool {
+            return bool ? .closed : .open
+        }
+        return nil
     }
 
     private func readSleepDisabled() -> Bool {
@@ -1227,18 +1325,25 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     private var cancellables = Set<AnyCancellable>()
     private var keyboardMonitor: Any?
     private var outsideClickMonitor: Any?
+    private var statusIconTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         configurePopover()
         configureStatusItem()
-        model.refresh()
+        if !model.startSessionOnLaunch {
+            model.prepareIdlePowerState()
+        }
+        model.refreshStatusIfNeeded(force: true)
         model.refreshScreenLockStatusIfNeeded(force: true)
 
         model.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                self?.refreshStatusIcon()
+                DispatchQueue.main.async {
+                    self?.refreshStatusIcon()
+                    self?.updateStatusIconTimer()
+                }
             }
             .store(in: &cancellables)
 
@@ -1249,13 +1354,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
             }
             .store(in: &cancellables)
 
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.model.refresh()
-            self?.refreshStatusIcon()
-        }
-        Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
-            self?.model.refreshExternalDisplayIfNeeded()
-        }
         configureKeyboardShortcuts()
 
         if model.startSessionOnLaunch {
@@ -1265,6 +1363,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         }
 
         refreshStatusIcon()
+        updateStatusIconTimer()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -1273,6 +1372,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
             NSEvent.removeMonitor(keyboardMonitor)
             self.keyboardMonitor = nil
         }
+        statusIconTimer?.invalidate()
+        statusIconTimer = nil
         if model.isRunning {
             model.stop()
         }
@@ -1320,6 +1421,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         statusItem.button?.setAccessibilityLabel("\(AppConstants.appName): \(accessibilityState)")
     }
 
+    private func updateStatusIconTimer() {
+        let shouldRunTimer = model.showElapsedInMenuBar && model.isRunning
+        if shouldRunTimer, statusIconTimer == nil {
+            statusIconTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                self?.refreshStatusIcon()
+            }
+        } else if !shouldRunTimer {
+            statusIconTimer?.invalidate()
+            statusIconTimer = nil
+        }
+    }
+
     private var accessibilityState: String {
         switch model.mode {
         case .idle:
@@ -1345,9 +1458,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         if popover.isShown {
             closePopover()
         } else {
-            model.refresh()
+            model.refreshStatusIfNeeded(force: true)
             model.refreshScreenLockStatusIfNeeded(force: true)
-            model.refreshExternalDisplayIfNeeded()
+            model.refreshExternalDisplayIfNeeded(force: true)
             refreshStatusIcon()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             startOutsideClickMonitor()
@@ -2141,7 +2254,7 @@ private struct AuthorizationView: View {
             VStack(spacing: 0) {
                 commandRow("On start", "sudo pmset -a disablesleep 1")
                 Divider()
-                commandRow("While running", "caffeinate -i -s -u")
+                commandRow("While running", "caffeinate -i -s")
                 Divider()
                 commandRow("On stop / quit", "sudo pmset -a disablesleep 0")
             }
@@ -2232,9 +2345,9 @@ private struct SettingsView: View {
                     get: { model.pollIntervalSeconds },
                     set: { model.updatePollInterval($0) }
                 )) {
-                    Text("0.5 s").tag(0.5)
-                    Text("1.0 s").tag(1.0)
-                    Text("2.0 s").tag(2.0)
+                    Text("1 s").tag(1.0)
+                    Text("2 s").tag(2.0)
+                    Text("5 s").tag(5.0)
                 }
                 .labelsHidden()
                 .frame(width: 92)

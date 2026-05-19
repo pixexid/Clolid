@@ -69,7 +69,7 @@ When a session starts, Clolid runs:
 
 ```bash
 sudo pmset -a disablesleep 1
-caffeinate -i -s -u
+caffeinate -i -s
 ```
 
 While the session is running, Clolid polls `AppleClamshellState` through `ioreg`. When the lid changes to closed, it runs:

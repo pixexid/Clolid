@@ -45,15 +45,15 @@ pgrep -fl caffeinate || true
 8. Commit the release changes and tag the commit:
 
 ```bash
-git tag v0.1.1
+git tag v0.1.2
 ```
 
 9. Create the GitHub Release and upload the archive:
 
 ```bash
-gh release create v0.1.1 releases/Clolid-0.1.1-macOS.zip \
+gh release create v0.1.2 releases/Clolid-0.1.2-macOS.zip \
   --repo pixexid/Clolid \
-  --title "Clolid 0.1.1" \
+  --title "Clolid 0.1.2" \
   --notes-file CHANGELOG.md
 ```
 
@@ -61,4 +61,4 @@ Every public version should have a matching GitHub Release with a downloadable `
 
 ## Current Version
 
-`0.1.1`
+`0.1.2`
