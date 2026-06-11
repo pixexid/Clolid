@@ -4,6 +4,11 @@ All notable changes to Clolid will be documented in this file.
 
 This project follows Semantic Versioning.
 
+## 0.1.3 - 2026-06-10
+
+- Fixed a menu-bar status refresh loop that could drive high CPU use during long-running sessions.
+- Avoided sleeping the external display on lid-close when a clamshell display is already online.
+
 ## 0.1.2 - 2026-05-19
 
 - Reduced idle resource use by removing continuous shell-backed status polling while the menu is closed.

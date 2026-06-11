@@ -61,4 +61,4 @@ Every public version should have a matching GitHub Release with a downloadable `
 
 ## Current Version
 
-`0.1.2`
+`0.1.3`

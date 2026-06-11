@@ -8,7 +8,7 @@ import UserNotifications
 private enum AppConstants {
     static let appName = "Clolid"
     static let bundleIdentifier = "com.pixexid.Clolid"
-    static let marketingVersion = "0.1.2"
+    static let marketingVersion = "0.1.3"
 }
 
 private enum LidState: String {
@@ -604,7 +604,11 @@ private final class KeeperModel: ObservableObject {
         lidState = currentLidState
 
         if lidJustClosed {
-            if sleepDisplayOnLidClose {
+            // `pmset displaysleepnow` sleeps EVERY connected display, not just the
+            // built-in. With an external display attached (clamshell), the built-in
+            // is already dark from the closed lid, so running it here would blank
+            // the external too. Only sleep displays when no external is online.
+            if sleepDisplayOnLidClose && !isExternalDisplayOnline() {
                 displaySleepNow()
             }
             if notifyOnLidClose {
@@ -708,6 +712,22 @@ private final class KeeperModel: ObservableObject {
     private func readSleepDisabled() -> Bool {
         let result = try? shell.run("/usr/bin/pmset", ["-g"])
         return result?.output.contains("SleepDisabled\t\t1") == true
+    }
+
+    /// Fast, synchronous check for an online non-built-in display. Used on the
+    /// lid-close transition where the cached `externalDisplayName` (refreshed at
+    /// most every 60s, asynchronously) may be stale. Avoids the slow
+    /// `system_profiler` call so the poll thread is not blocked.
+    private func isExternalDisplayOnline() -> Bool {
+        var displayCount: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &displayCount) == .success, displayCount > 0 else {
+            return false
+        }
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
+        guard CGGetOnlineDisplayList(displayCount, &displays, &displayCount) == .success else {
+            return false
+        }
+        return displays.prefix(Int(displayCount)).contains { CGDisplayIsBuiltin($0) == 0 }
     }
 
     private func readExternalDisplayName() -> String? {
@@ -1337,15 +1357,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         model.refreshStatusIfNeeded(force: true)
         model.refreshScreenLockStatusIfNeeded(force: true)
 
-        model.objectWillChange
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.refreshStatusIcon()
-                    self?.updateStatusIconTimer()
-                }
-            }
-            .store(in: &cancellables)
+        Publishers.MergeMany(
+            model.$isRunning.map { _ in () }.eraseToAnyPublisher(),
+            model.$lidState.map { _ in () }.eraseToAnyPublisher(),
+            model.$lastError.map { _ in () }.eraseToAnyPublisher(),
+            model.$startAtLogin.map { _ in () }.eraseToAnyPublisher(),
+            NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+                .map { _ in () }
+                .eraseToAnyPublisher()
+        )
+        .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
+        .sink { [weak self] _ in
+            self?.refreshStatusIcon()
+            self?.updateStatusIconTimer()
+        }
+        .store(in: &cancellables)
 
         model.$startAtLogin
             .receive(on: RunLoop.main)
