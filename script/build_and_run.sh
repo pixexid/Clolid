@@ -4,8 +4,8 @@ set -euo pipefail
 MODE="${1:-run}"
 APP_NAME="Clolid"
 BUNDLE_ID="com.pixexid.Clolid"
-APP_VERSION="0.1.3"
-APP_BUILD="4"
+APP_VERSION="0.1.4"
+APP_BUILD="5"
 MIN_SYSTEM_VERSION="13.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -42,6 +42,7 @@ chmod +x "$APP_BINARY"
 
 if [ -d "$BUILD_BIN_PATH/Clolid_Clolid.bundle" ]; then
   cp -R "$BUILD_BIN_PATH/Clolid_Clolid.bundle" "$APP_RESOURCES/"
+  cp -R "$BUILD_BIN_PATH/Clolid_Clolid.bundle" "$APP_BUNDLE/"
 fi
 
 cp "$ROOT_DIR/Sources/Clolid/Resources/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"

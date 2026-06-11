@@ -4,6 +4,10 @@ All notable changes to Clolid will be documented in this file.
 
 This project follows Semantic Versioning.
 
+## 0.1.4 - 2026-06-10
+
+- Fixed release packaging so downloaded apps can find the SwiftPM resource bundle at launch.
+
 ## 0.1.3 - 2026-06-10
 
 - Fixed a menu-bar status refresh loop that could drive high CPU use during long-running sessions.
