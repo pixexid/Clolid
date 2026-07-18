@@ -18,7 +18,8 @@ let package = Package(
             name: "ClolidRuntime",
             dependencies: ["ClolidCore"],
             linkerSettings: [
-                .linkedFramework("CoreGraphics")
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("IOKit")
             ]
         ),
         .executableTarget(

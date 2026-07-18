@@ -150,6 +150,12 @@ private final class KeeperModel: ObservableObject {
     @Published private(set) var externalDisplayName: String?
     @Published private(set) var displayTopology: DisplayTopology?
     @Published private(set) var agentReadiness: AgentReadiness?
+    @Published private(set) var externalKeyboardState: DetectionState = .unknown(
+        reason: "Checking connected input devices."
+    )
+    @Published private(set) var externalPointingDeviceState: DetectionState = .unknown(
+        reason: "Checking connected input devices."
+    )
     @Published private(set) var isOnACPower = false
     @Published private(set) var screenLockStatus = "Unknown"
     @Published private(set) var isApplyingScreenLock = false
@@ -175,6 +181,7 @@ private final class KeeperModel: ObservableObject {
     private let assertionController: SessionAssertionController
     private let lidTransitionController = LidTransitionController()
     private let displayTopologyMonitor = CoreGraphicsDisplayTopologyMonitor()
+    private let externalInputDeviceDetector = ExternalInputDeviceDetector()
     private let readinessEvaluator = AgentReadinessEvaluator()
     private var isRefreshingScreenLockStatus = false
     private var lastScreenLockRefreshAt: Date?
@@ -184,6 +191,8 @@ private final class KeeperModel: ObservableObject {
     private var lastPowerSourceCheckAt: Date?
     private var lastDisplayRefreshAt: Date?
     private var isRefreshingDisplays = false
+    private var lastExternalInputRefreshAt: Date?
+    private var isRefreshingExternalInputDevices = false
     private var isRefreshingStatus = false
     var elapsed: String {
         guard let startedAt else {
@@ -386,6 +395,31 @@ private final class KeeperModel: ObservableObject {
         }
     }
 
+    func refreshExternalInputDevicesIfNeeded(force: Bool = false) {
+        guard !isRefreshingExternalInputDevices else {
+            return
+        }
+        guard force
+            || lastExternalInputRefreshAt.map({ Date().timeIntervalSince($0) > 10 }) ?? true else {
+            return
+        }
+
+        isRefreshingExternalInputDevices = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else {
+                return
+            }
+            let detection = self.externalInputDeviceDetector.detect()
+            DispatchQueue.main.async {
+                self.externalKeyboardState = detection.keyboard
+                self.externalPointingDeviceState = detection.pointingDevice
+                self.lastExternalInputRefreshAt = Date()
+                self.isRefreshingExternalInputDevices = false
+                self.publishAgentReadiness(state: self.lidTransitionController.state)
+            }
+        }
+    }
+
     func start() {
         guard !isRunning else {
             return
@@ -467,6 +501,7 @@ private final class KeeperModel: ObservableObject {
             startPolling()
             refresh()
             refreshExternalDisplayIfNeeded(force: true)
+            refreshExternalInputDevicesIfNeeded(force: true)
             if notifyOnSessionStart {
                 notificationManager.post(
                     title: "Session started",
@@ -596,6 +631,9 @@ private final class KeeperModel: ObservableObject {
         sessionMode = mode
         UserDefaults.standard.set(mode.rawValue, forKey: "SessionMode")
         lidTransitionController.updateMode(mode, preferences: lidTransitionPreferences)
+        if mode == .agentDisplay {
+            refreshExternalInputDevicesIfNeeded(force: true)
+        }
         lastError = nil
     }
 
@@ -735,6 +773,9 @@ private final class KeeperModel: ObservableObject {
         if currentLidState == .closed {
             refreshExternalDisplayIfNeeded()
         }
+        if sessionMode == .agentDisplay {
+            refreshExternalInputDevicesIfNeeded()
+        }
     }
 
     private func postLidTransitionNotificationIfNeeded(_ currentLidState: LidState) {
@@ -785,12 +826,8 @@ private final class KeeperModel: ObservableObject {
                 sleepDisabled: sleepDisabled,
                 assertionProcessRunning: assertionController.isRunning,
                 topology: trustedTopology,
-                externalKeyboard: .unknown(
-                    reason: "External keyboard detection is not implemented."
-                ),
-                externalPointingDevice: .unknown(
-                    reason: "External pointing-device detection is not implemented."
-                ),
+                externalKeyboard: externalKeyboardState,
+                externalPointingDevice: externalPointingDeviceState,
                 screenLockStatus: screenLockStatus,
                 topologyStable: topologyStable
             )
@@ -1556,6 +1593,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         }
         model.refreshStatusIfNeeded(force: true)
         model.refreshScreenLockStatusIfNeeded(force: true)
+        model.refreshExternalInputDevicesIfNeeded(force: true)
 
         Publishers.MergeMany(
             model.$isRunning.map { _ in () }.eraseToAnyPublisher(),
@@ -1578,6 +1616,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.refreshStatusIcon()
+            }
+            .store(in: &cancellables)
+
+        NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.didWakeNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.model.refreshExternalInputDevicesIfNeeded(force: true)
             }
             .store(in: &cancellables)
 
@@ -1686,6 +1732,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
             model.refreshStatusIfNeeded(force: true)
             model.refreshScreenLockStatusIfNeeded(force: true)
             model.refreshExternalDisplayIfNeeded(force: true)
+            model.refreshExternalInputDevicesIfNeeded(force: true)
             refreshStatusIcon()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             startOutsideClickMonitor()

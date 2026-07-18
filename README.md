@@ -20,6 +20,7 @@ The app is intentionally small: it wraps the system power tools needed for this 
 - Keep the system awake with a mode-specific `caffeinate` assertion.
 - Stabilize CoreGraphics display-topology changes before deciding whether to sleep displays.
 - Wake a connected Agent Display with a separate five-second user-activity pulse.
+- Verify external keyboards and pointing devices from IOKit HID metadata.
 - Report Agent Display readiness with blocking conditions and honest advisories.
 - Optional notifications for session start and lid-close display sleep.
 - Optional start-at-login LaunchAgent.
@@ -106,7 +107,7 @@ caffeinate -u -t 5
 
 The manual display-sleep command remains available in both modes and sleeps all displays.
 
-Agent Display readiness checks the session, `disablesleep`, the long-lived assertion, external-display activity, topology stability, power source, and Screen Lock status. External keyboard and pointing-device detection is not implemented yet, so those checks are shown as advisories rather than silently reported as present.
+Agent Display readiness checks the session, `disablesleep`, the long-lived assertion, external-display activity, topology stability, power source, external input devices, and Screen Lock status. Clolid recognizes physical USB and Bluetooth keyboards, mice, and trackpads from IOKit HID metadata. A confirmed missing device blocks readiness. Incomplete metadata, unsupported transports, or IOKit enumeration failures remain advisories rather than being silently reported as present or absent.
 
 Clolid can also apply a session-scoped Screen Lock policy using `sysadminctl -screenLock`, which is the source that matches macOS Lock Screen settings on current macOS releases. The app asks for your Mac login password in a Clolid-styled prompt when a non-System Screen Lock policy is applied during a session, passes it to macOS for that command, and does not store it.
 

@@ -40,8 +40,8 @@ final class AgentReadinessEvaluatorTests: XCTestCase {
         let readiness = evaluator.evaluate(
             inputs(
                 topology: topology(externalActive: true),
-                keyboard: .unknown(reason: "Keyboard detection is not implemented."),
-                pointingDevice: .unknown(reason: "Pointing-device detection is not implemented.")
+                keyboard: .unknown(reason: "Keyboard metadata is unavailable."),
+                pointingDevice: .unknown(reason: "Pointing-device metadata is unavailable.")
             )
         )
 
@@ -49,6 +49,22 @@ final class AgentReadinessEvaluatorTests: XCTestCase {
         XCTAssertEqual(readiness.summary, "Ready with advisories")
         XCTAssertTrue(readiness.reasons.contains { $0.code == "external-keyboard-unknown" })
         XCTAssertTrue(readiness.reasons.contains { $0.code == "external-pointing-device-unknown" })
+    }
+
+    func testMissingInputDevicesAreBlocking() {
+        let readiness = evaluator.evaluate(
+            inputs(
+                topology: topology(externalActive: true),
+                keyboard: .absent,
+                pointingDevice: .absent
+            )
+        )
+
+        XCTAssertEqual(readiness.severity, .blocking)
+        XCTAssertTrue(readiness.reasons.contains { $0.code == "external-keyboard-missing" })
+        XCTAssertTrue(readiness.reasons.contains {
+            $0.code == "external-pointing-device-missing"
+        })
     }
 
     func testOnlineButInactiveExternalDisplayIsBlocking() {
