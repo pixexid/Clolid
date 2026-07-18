@@ -1,4 +1,6 @@
 import AppKit
+import ClolidCore
+import ClolidRuntime
 import Combine
 import Foundation
 import IOKit
@@ -142,9 +144,12 @@ private final class Shell {
 
 private final class KeeperModel: ObservableObject {
     @Published private(set) var isRunning = false
+    @Published private(set) var sessionMode: SessionMode
     @Published private(set) var lidState = LidState.unknown
     @Published private(set) var sleepDisabled = false
     @Published private(set) var externalDisplayName: String?
+    @Published private(set) var displayTopology: DisplayTopology?
+    @Published private(set) var agentReadiness: AgentReadiness?
     @Published private(set) var isOnACPower = false
     @Published private(set) var screenLockStatus = "Unknown"
     @Published private(set) var isApplyingScreenLock = false
@@ -167,22 +172,19 @@ private final class KeeperModel: ObservableObject {
     private let loginItemManager = LoginItemManager()
     private let notificationManager = NotificationManager()
     private let screenLockManager = ScreenLockManager()
+    private let assertionController: SessionAssertionController
+    private let lidTransitionController = LidTransitionController()
+    private let displayTopologyMonitor = CoreGraphicsDisplayTopologyMonitor()
+    private let readinessEvaluator = AgentReadinessEvaluator()
     private var isRefreshingScreenLockStatus = false
     private var lastScreenLockRefreshAt: Date?
-    private var caffeinateProcess: Process?
     private var pollTimer: Timer?
     private var startedAt: Date?
     private var lastObservedLidState = LidState.unknown
-    private var lastNoExternalDisplayNotificationAt: Date?
     private var lastPowerSourceCheckAt: Date?
     private var lastDisplayRefreshAt: Date?
     private var isRefreshingDisplays = false
     private var isRefreshingStatus = false
-    private var caffeinatePIDURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Caches/Clolid/caffeinate.pid")
-    }
-
     var elapsed: String {
         guard let startedAt else {
             return "00:00:00"
@@ -223,7 +225,53 @@ private final class KeeperModel: ObservableObject {
         }
     }
 
+    var assertionStatus: String {
+        guard let pid = assertionController.activePID else {
+            return "Stopped"
+        }
+        return "PID \(pid) · \(assertionController.activeArguments.joined(separator: " "))"
+    }
+
+    var assertionCommand: String {
+        "caffeinate \(sessionMode.policy.caffeinateArguments.joined(separator: " "))"
+    }
+
+    var displayStatus: String {
+        if displayTopology?.hasActiveExternalDisplay == true {
+            return externalDisplayName ?? "External display"
+        }
+        return "-"
+    }
+
+    var readinessStatus: String {
+        agentReadiness?.summary ?? "Checking"
+    }
+
+    var readinessDetail: String? {
+        agentReadiness?.reasons.first?.detail
+    }
+
+    private var lidTransitionPreferences: LidTransitionPreferences {
+        LidTransitionPreferences(
+            automaticDisplaySleepEnabled: sleepDisplayOnLidClose,
+            wakePulseEnabled: sessionMode == .agentDisplay,
+            missingDisplayWarningEnabled: notifyOnLidClose,
+            requireACPower: requireExternalPower
+        )
+    }
+
     init() {
+        let storedMode = UserDefaults.standard.string(forKey: "SessionMode")
+        let normalizedMode = SessionMode.normalized(rawValue: storedMode)
+        sessionMode = normalizedMode
+        assertionController = SessionAssertionController(
+            pidFileURL: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Caches/Clolid/caffeinate.pid")
+        )
+        if storedMode != normalizedMode.rawValue {
+            UserDefaults.standard.set(normalizedMode.rawValue, forKey: "SessionMode")
+        }
+
         if let legacy = UserDefaults.standard.string(forKey: "ScreenLockDelay") {
             let normalized = ScreenLockPolicy.normalized(rawValue: legacy)
             screenLockPolicyRaw = normalized.rawValue
@@ -237,6 +285,7 @@ private final class KeeperModel: ObservableObject {
         if pollIntervalSeconds < 1.0 {
             pollIntervalSeconds = 2.0
         }
+        lidTransitionController.delegate = self
     }
 
     func refresh() {
@@ -245,6 +294,7 @@ private final class KeeperModel: ObservableObject {
         isOnACPower = readIsOnACPower()
         startAtLogin = loginItemManager.isEnabled
         refreshScreenLockStatusIfNeeded()
+        publishAgentReadiness(state: lidTransitionController.state)
     }
 
     func refreshStatusIfNeeded(force: Bool = false) {
@@ -269,6 +319,7 @@ private final class KeeperModel: ObservableObject {
                 self.startAtLogin = currentStartAtLogin
                 self.isRefreshingStatus = false
                 self.refreshScreenLockStatusIfNeeded(force: force)
+                self.publishAgentReadiness(state: self.lidTransitionController.state)
             }
         }
     }
@@ -279,7 +330,9 @@ private final class KeeperModel: ObservableObject {
         }
 
         stopPolling()
-        stopCaffeinate()
+        displayTopologyMonitor.stop()
+        lidTransitionController.stop()
+        assertionController.stop()
         if readSleepDisabled() {
             _ = shell.runSuccessful("/usr/bin/sudo", ["-n", "/usr/bin/pmset", "-a", "disablesleep", "0"])
         }
@@ -304,6 +357,7 @@ private final class KeeperModel: ObservableObject {
             DispatchQueue.main.async {
                 self.screenLockStatus = current.label
                 self.isRefreshingScreenLockStatus = false
+                self.publishAgentReadiness(state: self.lidTransitionController.state)
             }
         }
     }
@@ -323,7 +377,9 @@ private final class KeeperModel: ObservableObject {
             }
             let displayName = self.readExternalDisplayName()
             DispatchQueue.main.async {
-                self.externalDisplayName = displayName
+                self.externalDisplayName = self.displayTopology?.hasExternalOnlineDisplay == true
+                    ? displayName
+                    : nil
                 self.lastDisplayRefreshAt = Date()
                 self.isRefreshingDisplays = false
             }
@@ -375,21 +431,39 @@ private final class KeeperModel: ObservableObject {
 
     private func start(password: String?) {
         do {
-            cleanupStaleCaffeinate()
             refresh()
             if requireExternalPower && !isOnACPower {
                 throw CommandError.failed("External power is required by your settings.")
             }
             try setClamshellSleepDisabled(true)
             try screenLockManager.apply(screenLockPolicy, password: password)
-            try startCaffeinate()
+            try assertionController.start(arguments: sessionMode.policy.caffeinateArguments)
             startedAt = Date()
-            lastObservedLidState = readLidState()
-            lidState = lastObservedLidState
+            let initialLidState = readLidState()
+            lidState = initialLidState
             sleepDisabled = true
             isRunning = true
             isApplyingScreenLock = false
             lastError = nil
+            let transitionStarted = lidTransitionController.start(
+                mode: sessionMode,
+                lidClosed: initialLidState == .closed,
+                isOnACPower: isOnACPower,
+                preferences: lidTransitionPreferences
+            )
+            lastObservedLidState = transitionStarted ? initialLidState : .unknown
+            do {
+                try displayTopologyMonitor.start { [weak self] in
+                    guard let self, self.isRunning else {
+                        return
+                    }
+                    self.lidTransitionController.refreshTopology(
+                        preferences: self.lidTransitionPreferences
+                    )
+                }
+            } catch {
+                NSLog("Clolid display monitor unavailable: %@", error.localizedDescription)
+            }
             startPolling()
             refresh()
             refreshExternalDisplayIfNeeded(force: true)
@@ -415,41 +489,70 @@ private final class KeeperModel: ObservableObject {
 
     func stop() {
         stopPolling()
-        stopCaffeinate()
+        displayTopologyMonitor.stop()
+        lidTransitionController.stop()
+        assertionController.stop()
 
+        var cleanupErrors: [String] = []
         do {
             try screenLockManager.restoreIfNeeded()
-            try setClamshellSleepDisabled(false)
-            lastError = nil
         } catch {
-            lastError = error.localizedDescription
+            cleanupErrors.append(error.localizedDescription)
+        }
+        do {
+            try setClamshellSleepDisabled(false)
+        } catch {
+            cleanupErrors.append(error.localizedDescription)
         }
 
         isRunning = false
         startedAt = nil
         sleepDisabled = false
+        lastError = cleanupErrors.first
         refresh()
     }
 
-    func displaySleepNow() {
+    @discardableResult
+    func displaySleepNow() -> Bool {
         if shell.runSuccessful("/usr/bin/pmset", ["displaysleepnow"]) {
             lastDisplaySleepAt = Date()
+            return true
         }
+        return false
     }
 
     func restoreNormalSleep() {
+        stopPolling()
+        displayTopologyMonitor.stop()
+        lidTransitionController.stop()
+        assertionController.stop()
+
+        var cleanupErrors: [String] = []
         do {
-            stopPolling()
-            stopCaffeinate()
             try screenLockManager.restoreIfNeeded()
-            try setClamshellSleepDisabled(false)
-            isRunning = false
-            startedAt = nil
-            sleepDisabled = false
-            lastError = nil
-            refresh()
         } catch {
-            lastError = error.localizedDescription
+            cleanupErrors.append(error.localizedDescription)
+        }
+        do {
+            try setClamshellSleepDisabled(false)
+        } catch {
+            cleanupErrors.append(error.localizedDescription)
+        }
+
+        isRunning = false
+        startedAt = nil
+        sleepDisabled = false
+        lastError = cleanupErrors.first
+        refresh()
+    }
+
+    func prepareForTermination() {
+        if isRunning {
+            stop()
+        } else {
+            displayTopologyMonitor.stop()
+            lidTransitionController.stop()
+            assertionController.stop()
         }
     }
 
@@ -474,6 +577,26 @@ private final class KeeperModel: ObservableObject {
         if isRunning {
             startPolling()
         }
+    }
+
+    func updateSessionMode(_ mode: SessionMode) {
+        guard mode != sessionMode else {
+            return
+        }
+
+        if isRunning {
+            do {
+                try assertionController.restart(arguments: mode.policy.caffeinateArguments)
+            } catch {
+                lastError = error.localizedDescription
+                return
+            }
+        }
+
+        sessionMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: "SessionMode")
+        lidTransitionController.updateMode(mode, preferences: lidTransitionPreferences)
+        lastError = nil
     }
 
     func updateScreenLockPolicy(_ policy: ScreenLockPolicy) {
@@ -547,38 +670,6 @@ private final class KeeperModel: ObservableObject {
         }
     }
 
-    private func startCaffeinate() throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        process.arguments = ["-i", "-s"]
-        try process.run()
-        caffeinateProcess = process
-        try FileManager.default.createDirectory(
-            at: caffeinatePIDURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try "\(process.processIdentifier)".write(to: caffeinatePIDURL, atomically: true, encoding: .utf8)
-    }
-
-    private func stopCaffeinate() {
-        caffeinateProcess?.terminate()
-        caffeinateProcess = nil
-        cleanupStaleCaffeinate()
-        try? FileManager.default.removeItem(at: caffeinatePIDURL)
-    }
-
-    private func cleanupStaleCaffeinate() {
-        guard let rawPID = try? String(contentsOf: caffeinatePIDURL, encoding: .utf8),
-              let pid = Int32(rawPID.trimmingCharacters(in: .whitespacesAndNewlines))
-        else {
-            return
-        }
-
-        if pid > 0 {
-            kill(pid, SIGTERM)
-        }
-    }
-
     private func startPolling() {
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: max(pollIntervalSeconds, 1.0), repeats: true) { [weak self] _ in
@@ -600,56 +691,110 @@ private final class KeeperModel: ObservableObject {
         }
 
         let currentLidState = readLidState()
-        let lidJustClosed = currentLidState == .closed && lastObservedLidState != .closed
         lidState = currentLidState
+        let preferences = lidTransitionPreferences
 
-        if lidJustClosed {
-            // `pmset displaysleepnow` sleeps EVERY connected display, not just the
-            // built-in. With an external display attached (clamshell), the built-in
-            // is already dark from the closed lid, so running it here would blank
-            // the external too. Only sleep displays when no external is online.
-            if sleepDisplayOnLidClose && !isExternalDisplayOnline() {
-                displaySleepNow()
-            }
-            if notifyOnLidClose {
-                notificationManager.post(
-                    title: "Display asleep",
-                    body: "Lid closed. Mac stays awake.",
-                    tone: .warn
+        if !lidTransitionController.state.sessionRunning {
+            if currentLidState == .unknown {
+                publishAgentReadiness(state: lidTransitionController.state)
+            } else {
+                let started = lidTransitionController.start(
+                    mode: sessionMode,
+                    lidClosed: currentLidState == .closed,
+                    isOnACPower: isOnACPower,
+                    preferences: preferences
                 )
+                if started {
+                    lastObservedLidState = currentLidState
+                }
             }
+        } else if currentLidState != .unknown, currentLidState != lastObservedLidState {
+            let handled = lidTransitionController.lidChanged(
+                closed: currentLidState == .closed,
+                preferences: preferences
+            )
+            if handled {
+                lastObservedLidState = currentLidState
+                postLidTransitionNotificationIfNeeded(currentLidState)
+            }
+        } else {
+            lidTransitionController.refreshTopology(preferences: preferences)
         }
 
-        if requireExternalPower && shouldRefreshPowerSource() {
+        if shouldRefreshPowerSource() {
             isOnACPower = readIsOnACPower()
-            if !isOnACPower {
-                lastError = "External power disconnected while session was running."
-                notificationManager.post(
-                    title: "Power unplugged",
-                    body: "Session stopped.",
-                    tone: .warn
-                )
-                stop()
+            lidTransitionController.powerChanged(
+                isOnACPower: isOnACPower,
+                preferences: preferences
+            )
+            if !isRunning {
                 return
             }
         }
 
-        if currentLidState == .closed && externalDisplayName == nil {
-            let shouldNotify = lastNoExternalDisplayNotificationAt.map { Date().timeIntervalSince($0) > 600 } ?? true
-            if shouldNotify {
-                lastNoExternalDisplayNotificationAt = Date()
-                notificationManager.post(
-                    title: "No external display detected",
-                    body: "Lid closed without external display.",
-                    tone: .warn
-                )
-            }
-        }
-
-        lastObservedLidState = currentLidState
         if currentLidState == .closed {
             refreshExternalDisplayIfNeeded()
         }
+    }
+
+    private func postLidTransitionNotificationIfNeeded(_ currentLidState: LidState) {
+        guard notifyOnLidClose, currentLidState == .closed else {
+            return
+        }
+
+        if sessionMode == .agentDisplay {
+            notificationManager.post(
+                title: "Agent display protected",
+                body: "Lid closed while the external display stays awake.",
+                tone: .ok
+            )
+        } else if displayTopology?.hasExternalOnlineDisplay == true {
+            notificationManager.post(
+                title: "Lid closed",
+                body: "External display remains active.",
+                tone: .warn
+            )
+        }
+    }
+
+    private func publishAgentReadiness(state: LidTransitionState) {
+        let trustedTopology = lidTransitionController.lastCaptureSucceeded
+            ? state.latestTopology
+            : nil
+        displayTopology = trustedTopology
+        if trustedTopology?.hasExternalOnlineDisplay != true {
+            externalDisplayName = nil
+        } else if externalDisplayName == nil {
+            refreshExternalDisplayIfNeeded()
+        }
+
+        let topologyStable: Bool
+        switch state.phase {
+        case .open:
+            topologyStable = true
+        case .settling(let context), .closed(let context):
+            topologyStable = context.topologyStable
+        }
+
+        agentReadiness = readinessEvaluator.evaluate(
+            ReadinessInputs(
+                sessionMode: sessionMode,
+                sessionRunning: state.sessionRunning,
+                lidClosed: lidState == .closed,
+                isOnACPower: isOnACPower,
+                sleepDisabled: sleepDisabled,
+                assertionProcessRunning: assertionController.isRunning,
+                topology: trustedTopology,
+                externalKeyboard: .unknown(
+                    reason: "External keyboard detection is not implemented."
+                ),
+                externalPointingDevice: .unknown(
+                    reason: "External pointing-device detection is not implemented."
+                ),
+                screenLockStatus: screenLockStatus,
+                topologyStable: topologyStable
+            )
+        )
     }
 
     private func shouldRefreshPowerSource() -> Bool {
@@ -714,22 +859,6 @@ private final class KeeperModel: ObservableObject {
         return result?.output.contains("SleepDisabled\t\t1") == true
     }
 
-    /// Fast, synchronous check for an online non-built-in display. Used on the
-    /// lid-close transition where the cached `externalDisplayName` (refreshed at
-    /// most every 60s, asynchronously) may be stale. Avoids the slow
-    /// `system_profiler` call so the poll thread is not blocked.
-    private func isExternalDisplayOnline() -> Bool {
-        var displayCount: UInt32 = 0
-        guard CGGetOnlineDisplayList(0, nil, &displayCount) == .success, displayCount > 0 else {
-            return false
-        }
-        var displays = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
-        guard CGGetOnlineDisplayList(displayCount, &displays, &displayCount) == .success else {
-            return false
-        }
-        return displays.prefix(Int(displayCount)).contains { CGDisplayIsBuiltin($0) == 0 }
-    }
-
     private func readExternalDisplayName() -> String? {
         let result = try? shell.run("/usr/sbin/system_profiler", ["SPDisplaysDataType"])
         guard let output = result?.output else {
@@ -773,6 +902,77 @@ private final class KeeperModel: ObservableObject {
         if result.status != 0 {
             throw CommandError.failed(result.output.trimmingCharacters(in: .whitespacesAndNewlines))
         }
+    }
+}
+
+extension KeeperModel: LidTransitionControllerDelegate {
+    func lidTransitionController(
+        _ controller: LidTransitionController,
+        didRequest effect: LidRuntimeEffect,
+        state: LidTransitionState
+    ) {
+        switch effect {
+        case .sleepAllDisplays:
+            if displaySleepNow() {
+                if notifyOnLidClose {
+                    notificationManager.post(
+                        title: "Display asleep",
+                        body: "Lid closed. Mac stays awake.",
+                        tone: .warn
+                    )
+                }
+            } else {
+                lastError = "Unable to sleep the connected displays."
+            }
+
+        case .publishReadiness:
+            publishAgentReadiness(state: state)
+
+        case .notifyOnce(_, let title, let body):
+            if notifyOnLidClose {
+                notificationManager.post(title: title, body: body, tone: .warn)
+            }
+
+        case .requestSessionStop(let reason):
+            notificationManager.post(
+                title: "Power unplugged",
+                body: "Session stopped.",
+                tone: .warn
+            )
+            stop()
+            lastError = reason
+
+        case .recordEvent(let event):
+            NSLog(
+                "Clolid [%@] %@: %@",
+                event.category,
+                event.code,
+                event.message
+            )
+
+        case .refreshTopology, .issueWakePulse:
+            break
+        }
+    }
+
+    func lidTransitionController(
+        _ controller: LidTransitionController,
+        topologyCaptureDidFail message: String,
+        state: LidTransitionState
+    ) {
+        displayTopology = nil
+        externalDisplayName = nil
+        publishAgentReadiness(state: state)
+        NSLog("Clolid topology capture failed: %@", message)
+    }
+
+    func lidTransitionController(
+        _ controller: LidTransitionController,
+        runtimeActionDidFail message: String,
+        state: LidTransitionState
+    ) {
+        lastError = message
+        publishAgentReadiness(state: state)
     }
 }
 
@@ -1359,6 +1559,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
 
         Publishers.MergeMany(
             model.$isRunning.map { _ in () }.eraseToAnyPublisher(),
+            model.$sessionMode.map { _ in () }.eraseToAnyPublisher(),
             model.$lidState.map { _ in () }.eraseToAnyPublisher(),
             model.$lastError.map { _ in () }.eraseToAnyPublisher(),
             model.$startAtLogin.map { _ in () }.eraseToAnyPublisher(),
@@ -1400,9 +1601,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         }
         statusIconTimer?.invalidate()
         statusIconTimer = nil
-        if model.isRunning {
-            model.stop()
-        }
+        model.prepareForTermination()
     }
 
     private func configurePopover() {
@@ -1674,9 +1873,19 @@ private struct KeeperPanelView: View {
                 actionButton
                 sectionLabel("Status")
                 statusRow(icon: "power", label: "Session", value: active ? "Running" : "Stopped", tint: active ? colors.accent : colors.text)
+                statusRow(icon: "slider.horizontal.3", label: "Mode", value: model.sessionMode.title, tint: model.sessionMode == .agentDisplay ? colors.accent : colors.dim)
+                statusRow(icon: "waveform.path.ecg", label: "Assertion", value: model.assertionStatus, tint: active ? colors.accent : colors.dim)
+                if model.sessionMode == .agentDisplay {
+                    statusRow(
+                        icon: "checkmark.shield",
+                        label: "Readiness",
+                        value: model.readinessStatus,
+                        tint: readinessTint
+                    )
+                }
                 statusRow(icon: "laptopcomputer", label: "Lid", value: model.lidState.title, tint: lidClosed ? colors.warn : colors.text)
                 statusRow(icon: "moon", label: "Lid awake", value: model.sleepDisabled ? "On" : "Off", tint: model.sleepDisabled ? colors.accent : colors.dim)
-                statusRow(icon: "display", label: "Display", value: model.externalDisplayName ?? "-", tint: colors.dim)
+                statusRow(icon: "display", label: "Display", value: model.displayStatus, tint: colors.dim)
                 statusRow(icon: "bolt.fill", label: "Power", value: model.isOnACPower ? "AC Power" : "Battery", tint: model.requireExternalPower && !model.isOnACPower ? colors.warn : colors.dim)
                 statusRow(icon: "lock", label: "Screen lock", value: model.screenLockStatus, tint: model.screenLockPolicy == .system ? colors.dim : colors.accent)
                 if let lastDisplaySleepAt = model.lastDisplaySleepAt {
@@ -1686,7 +1895,11 @@ private struct KeeperPanelView: View {
                     noticeRow(text: lastError)
                 }
                 divider
-                menuButton(icon: "moon.zzz", label: "Sleep display now", shortcut: "⌘⇧L") {
+                menuButton(
+                    icon: "moon.zzz",
+                    label: model.sessionMode == .agentDisplay ? "Sleep all displays now" : "Sleep display now",
+                    shortcut: "⌘⇧L"
+                ) {
                     model.displaySleepNow()
                 }
                 divider
@@ -1958,6 +2171,12 @@ private struct KeeperPanelView: View {
     }
 
     private var titleText: String {
+        if active && model.sessionMode == .agentDisplay {
+            if model.agentReadiness?.severity == .blocking {
+                return "Agent display needs attention."
+            }
+            return lidClosed ? "Agent display protected." : "Agent Display session is active."
+        }
         if lidClosed && active {
             return "Display asleep. Mac awake."
         }
@@ -1968,8 +2187,12 @@ private struct KeeperPanelView: View {
     }
 
     private var subtitleText: String {
+        if active && model.sessionMode == .agentDisplay {
+            return model.readinessDetail
+                ?? (lidClosed ? "External display stays awake." : "Close the lid when ready.")
+        }
         if lidClosed && active {
-            return model.externalDisplayName.map { "Using \($0)." } ?? "No external display found."
+            return model.displayStatus == "-" ? "No external display found." : "Using \(model.displayStatus)."
         }
         if active {
             return "Close the lid; display sleeps."
@@ -1981,6 +2204,11 @@ private struct KeeperPanelView: View {
         if model.lastError != nil {
             return colors.danger
         }
+        if active,
+           model.sessionMode == .agentDisplay,
+           model.agentReadiness?.severity == .blocking {
+            return colors.danger
+        }
         if lidClosed && active {
             return colors.warn
         }
@@ -1988,6 +2216,19 @@ private struct KeeperPanelView: View {
             return colors.accent
         }
         return colors.faint
+    }
+
+    private var readinessTint: Color {
+        switch model.agentReadiness?.severity {
+        case .ready:
+            return colors.accent
+        case .advisory:
+            return colors.warn
+        case .blocking:
+            return colors.danger
+        case nil:
+            return colors.dim
+        }
     }
 
     private var headerBackground: Color {
@@ -2176,14 +2417,15 @@ private struct WelcomeView: View {
                 }
             }
 
-            Text("Keeps your Mac awake with the lid closed, then sleeps the built-in display.")
+            Text("Keeps your Mac awake with the lid closed, with separate behavior for desks and unattended agents.")
                 .font(.system(size: 14))
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 12) {
                 featureRow("Closed-lid awake", "Turns on disablesleep for the session.")
-                featureRow("Lid watcher", "Sleeps the display as the lid closes.")
+                featureRow("Topology watcher", "Stabilizes display changes before taking action.")
+                featureRow("Agent Display", "Keeps the external display awake and reports readiness.")
                 featureRow("Clean exit", "Stop or quit restores normal sleep.")
             }
 
@@ -2280,7 +2522,7 @@ private struct AuthorizationView: View {
             VStack(spacing: 0) {
                 commandRow("On start", "sudo pmset -a disablesleep 1")
                 Divider()
-                commandRow("While running", "caffeinate -i -s")
+                commandRow("While running", model.assertionCommand)
                 Divider()
                 commandRow("On stop / quit", "sudo pmset -a disablesleep 0")
             }
@@ -2347,6 +2589,23 @@ private struct SettingsView: View {
         VStack(spacing: 0) {
             settingsSection("Session")
             settingsRow(
+                title: "Mode",
+                subtitle: model.sessionMode == .agentDisplay
+                    ? "Keeps an agent display awake."
+                    : "Standard closed-lid behavior."
+            ) {
+                Picker("", selection: Binding(
+                    get: { model.sessionMode },
+                    set: { model.updateSessionMode($0) }
+                )) {
+                    ForEach(SessionMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 132)
+            }
+            settingsRow(
                 title: "Auto-start session",
                 subtitle: "Run when app opens."
             ) {
@@ -2396,8 +2655,14 @@ private struct SettingsView: View {
 
             settingsSection("Behavior")
             settingsRow(title: "Sleep display on lid close") {
-                KeeperSwitch(isOn: $model.sleepDisplayOnLidClose)
-                    .accessibilityLabel("Sleep display on lid close")
+                if model.sessionMode.policy.permitsAutomaticDisplaySleep {
+                    KeeperSwitch(isOn: $model.sleepDisplayOnLidClose)
+                        .accessibilityLabel("Sleep display on lid close")
+                } else {
+                    Text("Disabled")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
             }
             settingsRow(title: "Lid close alert") {
                 KeeperSwitch(isOn: $model.notifyOnLidClose)
@@ -2527,7 +2792,7 @@ private struct AboutView: View {
             AppIconView(size: 64)
             Text("Clolid")
                 .font(.system(size: 20, weight: .bold))
-            Text("Closed-lid awake with instant display sleep.")
+            Text("Closed-lid awake for desks and unattended agents.")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

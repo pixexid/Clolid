@@ -11,8 +11,19 @@ let package = Package(
         .executable(name: "Clolid", targets: ["Clolid"])
     ],
     targets: [
+        .target(
+            name: "ClolidCore"
+        ),
+        .target(
+            name: "ClolidRuntime",
+            dependencies: ["ClolidCore"],
+            linkerSettings: [
+                .linkedFramework("CoreGraphics")
+            ]
+        ),
         .executableTarget(
             name: "Clolid",
+            dependencies: ["ClolidCore", "ClolidRuntime"],
             resources: [
                 .process("Resources")
             ],
@@ -21,6 +32,14 @@ let package = Package(
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("UserNotifications")
             ]
+        ),
+        .testTarget(
+            name: "ClolidCoreTests",
+            dependencies: ["ClolidCore"]
+        ),
+        .testTarget(
+            name: "ClolidRuntimeTests",
+            dependencies: ["ClolidCore", "ClolidRuntime"]
         )
     ]
 )

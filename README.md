@@ -4,7 +4,7 @@
   <img src="docs/assets/clolid-app-icon.png" alt="Clolid app icon" width="128">
 </p>
 
-Clolid is a lightweight macOS menu bar app for closed-lid desk setups. It keeps the Mac awake while the lid is closed and immediately asks macOS to sleep the built-in display when the lid-close event is detected.
+Clolid is a lightweight macOS menu bar app for closed-lid desk and unattended-agent setups. It keeps the Mac awake while the lid is closed, observes the live display topology, and applies a mode-specific display policy.
 
 The app is intentionally small: it wraps the system power tools needed for this workflow instead of trying to replace a full power-management utility.
 
@@ -16,8 +16,11 @@ The app is intentionally small: it wraps the system power tools needed for this 
 
 - Start and stop a closed-lid awake session from the menu bar.
 - Run `pmset disablesleep` only for the active session.
-- Keep the system awake with `caffeinate`.
-- Watch the lid state and call `pmset displaysleepnow` when the lid closes.
+- Choose Standard mode for the existing closed-lid workflow or Agent Display mode for unattended computer-use agents.
+- Keep the system awake with a mode-specific `caffeinate` assertion.
+- Stabilize CoreGraphics display-topology changes before deciding whether to sleep displays.
+- Wake a connected Agent Display with a separate five-second user-activity pulse.
+- Report Agent Display readiness with blocking conditions and honest advisories.
 - Optional notifications for session start and lid-close display sleep.
 - Optional start-at-login LaunchAgent.
 - Settings for external-power requirement, polling interval, and menu-bar icon style.
@@ -65,28 +68,57 @@ The package script creates `dist/Clolid.app` and `releases/Clolid-<version>-macO
 
 ## How It Works
 
-When a session starts, Clolid runs:
+When a session starts, Clolid enables `disablesleep` and launches one owned assertion process:
 
 ```bash
 sudo pmset -a disablesleep 1
+```
+
+Standard mode uses:
+
+```bash
 caffeinate -i -s
 ```
 
-While the session is running, Clolid polls `AppleClamshellState` through `ioreg`. When the lid changes to closed, it runs:
+Agent Display mode uses:
+
+```bash
+caffeinate -d -i -s
+```
+
+Agent Display mode prevents automatic display sleep. Changing modes during an active session starts the replacement assertion before stopping the previous Clolid-owned process.
+
+While the session is running, Clolid reads `AppleClamshellState` and captures CoreGraphics topology snapshots. A display-reconfiguration callback triggers a fresh snapshot, while the normal lid poll remains the fallback.
+
+In Standard mode, a closed-lid transition must produce three time-spaced topology samples with no external display before Clolid runs:
 
 ```bash
 pmset displaysleepnow
 ```
 
+The pre-close topology remains authoritative for the whole transition. A transient disconnect cannot authorize display sleep if an external display was present before or during the lid-close change.
+
+In Agent Display mode, Clolid never runs the automatic display-sleep command. When an external display is available at lid close or reconnects during settling, Clolid launches a separate, self-expiring wake pulse:
+
+```bash
+caffeinate -u -t 5
+```
+
+The manual display-sleep command remains available in both modes and sleeps all displays.
+
+Agent Display readiness checks the session, `disablesleep`, the long-lived assertion, external-display activity, topology stability, power source, and Screen Lock status. External keyboard and pointing-device detection is not implemented yet, so those checks are shown as advisories rather than silently reported as present.
+
 Clolid can also apply a session-scoped Screen Lock policy using `sysadminctl -screenLock`, which is the source that matches macOS Lock Screen settings on current macOS releases. The app asks for your Mac login password in a Clolid-styled prompt when a non-System Screen Lock policy is applied during a session, passes it to macOS for that command, and does not store it.
 
 Use `System` to leave the setting untouched. Use `No lock` only for trusted long-running local automation sessions where you accept that the user session stays unlocked while the display is off.
 
-When the session stops, Clolid terminates its own `caffeinate` process and restores:
+When the session stops, Clolid terminates only its owned `caffeinate` process and restores:
 
 ```bash
 sudo pmset -a disablesleep 0
 ```
+
+Crash recovery verifies the saved PID, exact executable path, and process start identity before signaling a stale assertion, preventing a reused PID from being treated as Clolid-owned.
 
 ## Safety Notes
 
@@ -96,8 +128,9 @@ If you ever need to restore normal sleep manually:
 
 ```bash
 sudo pmset -a disablesleep 0
-pkill caffeinate
 ```
+
+Quit Clolid to terminate the assertion process it owns. Avoid `pkill caffeinate`, which can terminate unrelated processes started by other apps or shell sessions.
 
 If Screen Lock was changed outside Clolid, configure “Require password after screen saver begins or display is turned off” in System Settings or check the effective value with `sysadminctl -screenLock status`.
 
@@ -107,6 +140,10 @@ If Screen Lock was changed outside Clolid, configure “Require password after s
 Package.swift
 Sources/Clolid/main.swift
 Sources/Clolid/Resources/
+Sources/ClolidCore/
+Sources/ClolidRuntime/
+Tests/ClolidCoreTests/
+Tests/ClolidRuntimeTests/
 script/build_and_run.sh
 ```
 

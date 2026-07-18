@@ -21,10 +21,26 @@ cd "$ROOT_DIR"
 
 PID_FILE="$HOME/Library/Caches/Clolid/caffeinate.pid"
 if [ -f "$PID_FILE" ]; then
-  OLD_CAFFEINATE_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-  if [ -n "$OLD_CAFFEINATE_PID" ]; then
-    kill "$OLD_CAFFEINATE_PID" >/dev/null 2>&1 || true
-  fi
+  read -r OLD_CAFFEINATE_PID OLD_CAFFEINATE_START_SECONDS _ <"$PID_FILE" || true
+  OLD_CAFFEINATE_COMMAND="$(ps -ww -p "$OLD_CAFFEINATE_PID" -o args= 2>/dev/null | xargs || true)"
+  OLD_CAFFEINATE_PARENT="$(ps -p "$OLD_CAFFEINATE_PID" -o ppid= 2>/dev/null | xargs || true)"
+  CURRENT_CLOLID_PID="$(pgrep -x "$APP_NAME" | head -n 1 || true)"
+  OLD_CAFFEINATE_START="$(ps -ww -p "$OLD_CAFFEINATE_PID" -o lstart= 2>/dev/null | xargs || true)"
+  CURRENT_CAFFEINATE_START_SECONDS="$(
+    LC_ALL=C date -j -f "%a %b %e %T %Y" "$OLD_CAFFEINATE_START" "+%s" 2>/dev/null || true
+  )"
+  case "$OLD_CAFFEINATE_COMMAND" in
+    /usr/bin/caffeinate|/usr/bin/caffeinate\ *)
+      if [ -n "$OLD_CAFFEINATE_START_SECONDS" ] &&
+         [ "$CURRENT_CAFFEINATE_START_SECONDS" = "$OLD_CAFFEINATE_START_SECONDS" ]; then
+        kill "$OLD_CAFFEINATE_PID" >/dev/null 2>&1 || true
+      elif [ -z "$OLD_CAFFEINATE_START_SECONDS" ] &&
+           [ -n "$CURRENT_CLOLID_PID" ] &&
+           [ "$OLD_CAFFEINATE_PARENT" = "$CURRENT_CLOLID_PID" ]; then
+        kill "$OLD_CAFFEINATE_PID" >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
   rm -f "$PID_FILE"
 fi
 
