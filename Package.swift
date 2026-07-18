@@ -25,9 +25,7 @@ let package = Package(
         .executableTarget(
             name: "Clolid",
             dependencies: ["ClolidCore", "ClolidRuntime"],
-            resources: [
-                .process("Resources")
-            ],
+            exclude: ["Resources"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("SwiftUI"),

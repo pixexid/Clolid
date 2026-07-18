@@ -1867,7 +1867,7 @@ private enum StatusIconFactory {
     }
 
     private static func drawResourceIcon(named resourceName: String, in rect: NSRect, color: NSColor) {
-        guard let url = Bundle.module.url(forResource: resourceName, withExtension: "svg"),
+        guard let url = Bundle.main.url(forResource: resourceName, withExtension: "svg"),
               let sourceImage = NSImage(contentsOf: url)
         else {
             drawFallbackLid(in: rect, color: color)
@@ -2428,7 +2428,7 @@ private struct AppIconView: View {
     }
 
     private static func templateIcon(named resourceName: String) -> NSImage? {
-        guard let url = Bundle.module.url(forResource: resourceName, withExtension: "svg"),
+        guard let url = Bundle.main.url(forResource: resourceName, withExtension: "svg"),
               let image = NSImage(contentsOf: url)
         else {
             return nil

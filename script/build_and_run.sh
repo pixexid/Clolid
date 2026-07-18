@@ -46,7 +46,6 @@ fi
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
-find "$ROOT_DIR/.build" -type d -name "Clolid_Clolid.bundle" -prune -exec rm -rf {} + 2>/dev/null || true
 swift build
 BUILD_BIN_PATH="$(swift build --show-bin-path)"
 BUILD_BINARY="$BUILD_BIN_PATH/$APP_NAME"
@@ -56,12 +55,9 @@ mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
 
-if [ -d "$BUILD_BIN_PATH/Clolid_Clolid.bundle" ]; then
-  cp -R "$BUILD_BIN_PATH/Clolid_Clolid.bundle" "$APP_RESOURCES/"
-  cp -R "$BUILD_BIN_PATH/Clolid_Clolid.bundle" "$APP_BUNDLE/"
-fi
-
 cp "$ROOT_DIR/Sources/Clolid/Resources/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"
+cp "$ROOT_DIR/Sources/Clolid/Resources/clolid-active.svg" "$APP_RESOURCES/clolid-active.svg"
+cp "$ROOT_DIR/Sources/Clolid/Resources/clolid-idle.svg" "$APP_RESOURCES/clolid-idle.svg"
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -93,6 +89,9 @@ cat >"$INFO_PLIST" <<PLIST
 </dict>
 </plist>
 PLIST
+
+/usr/bin/codesign --force --deep --sign - "$APP_BUNDLE"
+/usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
 
 open_app() {
   /usr/bin/open "$APP_BUNDLE"
