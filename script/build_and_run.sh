@@ -7,6 +7,13 @@ BUNDLE_ID="com.pixexid.Clolid"
 APP_VERSION="0.2.0"
 APP_BUILD="6"
 MIN_SYSTEM_VERSION="13.0"
+BUILD_CONFIGURATION="debug"
+
+case "$MODE" in
+  --bundle|bundle)
+    BUILD_CONFIGURATION="release"
+    ;;
+esac
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
@@ -19,35 +26,42 @@ INFO_PLIST="$APP_CONTENTS/Info.plist"
 
 cd "$ROOT_DIR"
 
-PID_FILE="$HOME/Library/Caches/Clolid/caffeinate.pid"
-if [ -f "$PID_FILE" ]; then
-  read -r OLD_CAFFEINATE_PID OLD_CAFFEINATE_START_SECONDS _ <"$PID_FILE" || true
-  OLD_CAFFEINATE_COMMAND="$(ps -ww -p "$OLD_CAFFEINATE_PID" -o args= 2>/dev/null | xargs || true)"
-  OLD_CAFFEINATE_PARENT="$(ps -p "$OLD_CAFFEINATE_PID" -o ppid= 2>/dev/null | xargs || true)"
-  CURRENT_CLOLID_PID="$(pgrep -x "$APP_NAME" | head -n 1 || true)"
-  OLD_CAFFEINATE_START="$(ps -ww -p "$OLD_CAFFEINATE_PID" -o lstart= 2>/dev/null | xargs || true)"
-  CURRENT_CAFFEINATE_START_SECONDS="$(
-    LC_ALL=C date -j -f "%a %b %e %T %Y" "$OLD_CAFFEINATE_START" "+%s" 2>/dev/null || true
-  )"
-  case "$OLD_CAFFEINATE_COMMAND" in
-    /usr/bin/caffeinate|/usr/bin/caffeinate\ *)
-      if [ -n "$OLD_CAFFEINATE_START_SECONDS" ] &&
-         [ "$CURRENT_CAFFEINATE_START_SECONDS" = "$OLD_CAFFEINATE_START_SECONDS" ]; then
-        kill "$OLD_CAFFEINATE_PID" >/dev/null 2>&1 || true
-      elif [ -z "$OLD_CAFFEINATE_START_SECONDS" ] &&
-           [ -n "$CURRENT_CLOLID_PID" ] &&
-           [ "$OLD_CAFFEINATE_PARENT" = "$CURRENT_CLOLID_PID" ]; then
-        kill "$OLD_CAFFEINATE_PID" >/dev/null 2>&1 || true
-      fi
-      ;;
-  esac
-  rm -f "$PID_FILE"
+if [ "$BUILD_CONFIGURATION" = "release" ]; then
+  if pgrep -f "^$APP_BINARY$" >/dev/null; then
+    echo "Quit the running $APP_BUNDLE development copy before packaging." >&2
+    exit 1
+  fi
+else
+  PID_FILE="$HOME/Library/Caches/Clolid/caffeinate.pid"
+  if [ -f "$PID_FILE" ]; then
+    read -r OLD_CAFFEINATE_PID OLD_CAFFEINATE_START_SECONDS _ <"$PID_FILE" || true
+    OLD_CAFFEINATE_COMMAND="$(ps -ww -p "$OLD_CAFFEINATE_PID" -o args= 2>/dev/null | xargs || true)"
+    OLD_CAFFEINATE_PARENT="$(ps -p "$OLD_CAFFEINATE_PID" -o ppid= 2>/dev/null | xargs || true)"
+    CURRENT_CLOLID_PID="$(pgrep -x "$APP_NAME" | head -n 1 || true)"
+    OLD_CAFFEINATE_START="$(ps -ww -p "$OLD_CAFFEINATE_PID" -o lstart= 2>/dev/null | xargs || true)"
+    CURRENT_CAFFEINATE_START_SECONDS="$(
+      LC_ALL=C date -j -f "%a %b %e %T %Y" "$OLD_CAFFEINATE_START" "+%s" 2>/dev/null || true
+    )"
+    case "$OLD_CAFFEINATE_COMMAND" in
+      /usr/bin/caffeinate|/usr/bin/caffeinate\ *)
+        if [ -n "$OLD_CAFFEINATE_START_SECONDS" ] &&
+           [ "$CURRENT_CAFFEINATE_START_SECONDS" = "$OLD_CAFFEINATE_START_SECONDS" ]; then
+          kill "$OLD_CAFFEINATE_PID" >/dev/null 2>&1 || true
+        elif [ -z "$OLD_CAFFEINATE_START_SECONDS" ] &&
+             [ -n "$CURRENT_CLOLID_PID" ] &&
+             [ "$OLD_CAFFEINATE_PARENT" = "$CURRENT_CLOLID_PID" ]; then
+          kill "$OLD_CAFFEINATE_PID" >/dev/null 2>&1 || true
+        fi
+        ;;
+    esac
+    rm -f "$PID_FILE"
+  fi
+
+  pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 fi
 
-pkill -x "$APP_NAME" >/dev/null 2>&1 || true
-
-swift build
-BUILD_BIN_PATH="$(swift build --show-bin-path)"
+swift build -c "$BUILD_CONFIGURATION"
+BUILD_BIN_PATH="$(swift build -c "$BUILD_CONFIGURATION" --show-bin-path)"
 BUILD_BINARY="$BUILD_BIN_PATH/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"

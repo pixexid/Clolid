@@ -23,11 +23,12 @@ Before the first stable `1.0.0` release, minor versions may still include produc
 5. Run:
 
 ```bash
-swift build
+swift test -Xswiftc -warnings-as-errors
+swift build -c release -Xswiftc -warnings-as-errors
 ./script/build_and_run.sh --verify
 ```
 
-The release archive command uses `./script/build_and_run.sh --bundle` internally so packaging does not launch the app.
+The interactive verification command uses a debug build. The release archive command uses `./script/build_and_run.sh --bundle` internally, which compiles the optimized Swift release configuration without launching the app.
 
 6. Confirm normal sleep is restored when the session stops:
 
@@ -40,20 +41,25 @@ pgrep -fl caffeinate || true
 
 ```bash
 ./script/package_release.sh
+/usr/bin/codesign --verify --deep --strict dist/Clolid.app
+unzip -t "releases/Clolid-$(cat VERSION)-macOS.zip"
 ```
 
 8. Commit the release changes and tag the commit:
 
 ```bash
-git tag v0.2.0
+version="$(tr -d '[:space:]' < VERSION)"
+git tag -a "v$version" -m "Clolid $version"
+git push origin main "v$version"
 ```
 
 9. Create the GitHub Release and upload the archive:
 
 ```bash
-gh release create v0.2.0 releases/Clolid-0.2.0-macOS.zip \
+version="$(tr -d '[:space:]' < VERSION)"
+gh release create "v$version" "releases/Clolid-$version-macOS.zip" \
   --repo pixexid/Clolid \
-  --title "Clolid 0.2.0" \
+  --title "Clolid $version" \
   --notes-file CHANGELOG.md
 ```
 

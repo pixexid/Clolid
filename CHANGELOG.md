@@ -4,6 +4,12 @@ All notable changes to Clolid will be documented in this file.
 
 This project follows Semantic Versioning.
 
+## Unreleased
+
+- Fixed release packaging to compile the optimized Swift release configuration.
+- Prevented release packaging from stopping an installed Clolid session or its owned sleep assertion.
+- Expanded installation, permission, readiness, dummy-display, and conflicting-power-tool documentation.
+
 ## 0.2.0 - 2026-07-17
 
 - Added Agent Display mode for unattended computer-use sessions, with a display wake assertion that never automatically sleeps connected displays.

@@ -5,7 +5,8 @@ Thanks for helping improve Clolid. Keep changes small, testable, and focused on 
 ## Development Setup
 
 ```bash
-swift build
+swift test -Xswiftc -warnings-as-errors
+swift build -c release -Xswiftc -warnings-as-errors
 ./script/build_and_run.sh --verify
 ```
 
@@ -14,8 +15,9 @@ swift build
 - Keep one behavioral change per pull request.
 - Update `README.md` when user-facing behavior changes.
 - Update `VERSIONING.md` only when the release process changes.
-- Run `swift build` before opening a pull request.
+- Run the warnings-as-errors test and release-build commands before opening a pull request.
 - For UI changes, run `./script/build_and_run.sh --verify` and check the menu-bar app manually.
+- For packaging changes, run `./script/package_release.sh` and verify the app bundle with `codesign --verify --deep --strict dist/Clolid.app`.
 
 ## Code Guidelines
 
