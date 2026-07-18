@@ -10,7 +10,7 @@ import UserNotifications
 private enum AppConstants {
     static let appName = "Clolid"
     static let bundleIdentifier = "com.pixexid.Clolid"
-    static let marketingVersion = "0.1.4"
+    static let marketingVersion = "0.2.0"
 }
 
 private enum LidState: String {

@@ -4,6 +4,14 @@ All notable changes to Clolid will be documented in this file.
 
 This project follows Semantic Versioning.
 
+## 0.2.0 - 2026-07-17
+
+- Added Agent Display mode for unattended computer-use sessions, with a display wake assertion that never automatically sleeps connected displays.
+- Added stable CoreGraphics topology sampling across lid-close and display-reconnect transitions.
+- Added a separate, self-expiring wake pulse when an Agent Display connects or becomes available.
+- Added live readiness checks for the session assertion, display topology, power, Screen Lock, and physical external keyboard and pointing devices.
+- Hardened assertion-process cleanup by verifying the executable path and process start identity before signaling an owned PID.
+
 ## 0.1.4 - 2026-06-10
 
 - Fixed release packaging so downloaded apps can find the SwiftPM resource bundle at launch.
