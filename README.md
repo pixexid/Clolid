@@ -8,6 +8,10 @@ Clolid is a lightweight macOS menu bar app for closed-lid desk and unattended-ag
 
 The app is intentionally small: it wraps the system power tools needed for this workflow instead of trying to replace a full power-management utility.
 
+<p align="center">
+  <img src="docs/assets/clolid-menu.jpeg" alt="Clolid Agent Display session menu showing status and readiness" width="356">
+</p>
+
 ## Features
 
 - Start and stop a closed-lid awake session from the menu bar.
