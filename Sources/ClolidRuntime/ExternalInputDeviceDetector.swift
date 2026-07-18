@@ -36,13 +36,10 @@ public protocol HIDDeviceInventoryProviding {
 }
 
 public enum HIDDeviceInventoryError: LocalizedError {
-    case managerOpenFailed(IOReturn)
     case enumerationUnavailable
 
     public var errorDescription: String? {
         switch self {
-        case .managerOpenFailed(let result):
-            return "External input status is unavailable (IOKit error \(result))."
         case .enumerationUnavailable:
             return "External input status is unavailable because IOKit returned no device inventory."
         }
@@ -60,14 +57,6 @@ public struct IOKitHIDDeviceInventoryProvider: HIDDeviceInventoryProviding {
             [kIOHIDDeviceUsagePageKey: 0x0D, kIOHIDDeviceUsageKey: 0x05]
         ]
         IOHIDManagerSetDeviceMatchingMultiple(manager, matches as CFArray)
-
-        let openResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-        guard openResult == kIOReturnSuccess else {
-            throw HIDDeviceInventoryError.managerOpenFailed(openResult)
-        }
-        defer {
-            IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-        }
 
         guard let deviceSet = IOHIDManagerCopyDevices(manager) else {
             throw HIDDeviceInventoryError.enumerationUnavailable

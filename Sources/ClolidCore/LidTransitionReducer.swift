@@ -61,10 +61,12 @@ public struct LidCloseContext: Equatable, Sendable {
     public internal(set) var consecutiveStableSamples: Int
     public internal(set) var consecutiveNoExternalSamples: Int
     public internal(set) var topologyStable: Bool
+    public let externalDisplayAvailableAtClose: Bool
     public internal(set) var externalDisplayObservedDuringTransition: Bool
     public internal(set) var automaticSleepEvaluated: Bool
     public internal(set) var automaticSleepIssued: Bool
     public internal(set) var wakePulseIssued: Bool
+    public internal(set) var postSettleWakePulseIssued: Bool
     public internal(set) var missingDisplayWarningIssued: Bool
 
     init(
@@ -81,11 +83,13 @@ public struct LidCloseContext: Equatable, Sendable {
         self.consecutiveStableSamples = 1
         self.consecutiveNoExternalSamples = latestTopology.hasExternalOnlineDisplay ? 0 : 1
         self.topologyStable = false
+        self.externalDisplayAvailableAtClose = latestTopology.hasExternalOnlineDisplay
         self.externalDisplayObservedDuringTransition =
             preCloseTopology.hasExternalOnlineDisplay || latestTopology.hasExternalOnlineDisplay
         self.automaticSleepEvaluated = false
         self.automaticSleepIssued = false
         self.wakePulseIssued = false
+        self.postSettleWakePulseIssued = false
         self.missingDisplayWarningIssued = false
     }
 }
@@ -208,10 +212,10 @@ public struct LidTransitionReducer: Sendable {
             case .open:
                 return []
             case .settling(var context):
-                context.wakePulseIssued = false
+                resetFailedWakePulse(in: &context)
                 state.phase = .settling(context)
             case .closed(var context):
-                context.wakePulseIssued = false
+                resetFailedWakePulse(in: &context)
                 state.phase = .closed(context)
             }
             return [.publishReadiness]
@@ -265,6 +269,7 @@ public struct LidTransitionReducer: Sendable {
             case .open:
                 return [.publishReadiness]
             case .settling(var context), .closed(var context):
+                let wakePulseHadBeenIssued = context.wakePulseIssued
                 update(&context, with: topology)
                 var effects: [LidRuntimeEffect] = [.publishReadiness]
 
@@ -282,6 +287,15 @@ public struct LidTransitionReducer: Sendable {
                 )
 
                 if context.topologyStable {
+                    if wakePulseHadBeenIssued,
+                       shouldIssuePostSettleWakePulse(
+                           context: context,
+                           mode: state.sessionMode,
+                           preferences: preferences
+                       ) {
+                        context.postSettleWakePulseIssued = true
+                        effects.append(.issueWakePulse(duration: configuration.wakePulseDuration))
+                    }
                     appendAutomaticDisplaySleepDecision(
                         context: &context,
                         mode: state.sessionMode,
@@ -360,6 +374,28 @@ public struct LidTransitionReducer: Sendable {
             && preferences.wakePulseEnabled
             && !context.wakePulseIssued
             && context.latestTopology.hasExternalOnlineDisplay
+    }
+
+    private func shouldIssuePostSettleWakePulse(
+        context: LidCloseContext,
+        mode: SessionMode,
+        preferences: LidTransitionPreferences
+    ) -> Bool {
+        mode.policy.supportsWakePulse
+            && preferences.wakePulseEnabled
+            && context.externalDisplayAvailableAtClose
+            && context.wakePulseIssued
+            && !context.postSettleWakePulseIssued
+            && context.topologyStable
+            && context.latestTopology.hasExternalOnlineDisplay
+    }
+
+    private func resetFailedWakePulse(in context: inout LidCloseContext) {
+        if context.postSettleWakePulseIssued {
+            context.postSettleWakePulseIssued = false
+        } else {
+            context.wakePulseIssued = false
+        }
     }
 
     private func appendAutomaticDisplaySleepDecision(

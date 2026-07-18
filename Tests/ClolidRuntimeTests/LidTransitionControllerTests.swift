@@ -118,6 +118,38 @@ final class LidTransitionControllerTests: XCTestCase {
         XCTAssertEqual(wakePulse.durations, [5])
     }
 
+    func testAgentCloseRenewsWakePulseAfterTopologyStabilizes() {
+        let provider = FakeTopologyProvider(
+            results: [
+                .success(topology(externalActive: true, offset: 0)),
+                .success(topology(externalActive: true, offset: 0.5)),
+                .success(topology(externalActive: true, offset: 1))
+            ]
+        )
+        let wakePulse = FakeWakePulseController()
+        let controller = makeController(provider: provider, wakePulse: wakePulse)
+
+        XCTAssertTrue(
+            controller.start(
+                mode: .agentDisplay,
+                lidClosed: true,
+                isOnACPower: true,
+                preferences: agentPreferences(),
+                at: start
+            )
+        )
+        controller.refreshTopology(
+            preferences: agentPreferences(),
+            at: start.addingTimeInterval(0.5)
+        )
+        controller.refreshTopology(
+            preferences: agentPreferences(),
+            at: start.addingTimeInterval(1)
+        )
+
+        XCTAssertEqual(wakePulse.durations, [5, 5])
+    }
+
     func testModeUpdateChangesPolicyWithoutResettingCloseContext() {
         let provider = FakeTopologyProvider(results: [.success(topology(externalActive: true))])
         let wakePulse = FakeWakePulseController()

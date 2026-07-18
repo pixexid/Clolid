@@ -309,6 +309,96 @@ final class LidTransitionReducerTests: XCTestCase {
         XCTAssertTrue(duplicate.isEmpty)
     }
 
+    func testAgentModeRenewsWakePulseAfterDummyAndPhysicalDisplaysSettle() {
+        let closeTopology = topologyWithDummyAndPhysicalDisplay(
+            physicalDisplayActive: true
+        )
+        var state = runningState(mode: .agentDisplay, topology: closeTopology)
+        let preferences = agentPreferences()
+
+        let closeEffects = reducer.reduce(
+            state: &state,
+            event: .lidClosed(topology: closeTopology, at: start),
+            preferences: preferences
+        )
+        let secondSampleEffects = reducer.reduce(
+            state: &state,
+            event: .topologyChanged(
+                topologyWithDummyAndPhysicalDisplay(
+                    physicalDisplayActive: false,
+                    offset: 0.5
+                )
+            ),
+            preferences: preferences
+        )
+        let stableEffects = reducer.reduce(
+            state: &state,
+            event: .topologyChanged(
+                topologyWithDummyAndPhysicalDisplay(
+                    physicalDisplayActive: false,
+                    offset: 1
+                )
+            ),
+            preferences: preferences
+        )
+        let laterEffects = reducer.reduce(
+            state: &state,
+            event: .topologyChanged(
+                topologyWithDummyAndPhysicalDisplay(
+                    physicalDisplayActive: false,
+                    offset: 1.5
+                )
+            ),
+            preferences: preferences
+        )
+
+        XCTAssertEqual(closeEffects.filter(\.isWakePulse).count, 1)
+        XCTAssertEqual(secondSampleEffects.filter(\.isWakePulse).count, 0)
+        XCTAssertEqual(stableEffects.filter(\.isWakePulse).count, 1)
+        XCTAssertEqual(laterEffects.filter(\.isWakePulse).count, 0)
+        XCTAssertFalse(
+            (closeEffects + secondSampleEffects + stableEffects + laterEffects)
+                .contains(.sleepAllDisplays)
+        )
+        XCTAssertTrue(closeContext(from: state).postSettleWakePulseIssued)
+    }
+
+    func testFailedPostSettleWakePulseCanRetry() {
+        let closeTopology = topology(externalDisplay: true)
+        var state = runningState(mode: .agentDisplay, topology: closeTopology)
+        let preferences = agentPreferences()
+
+        _ = reducer.reduce(
+            state: &state,
+            event: .lidClosed(topology: closeTopology, at: start),
+            preferences: preferences
+        )
+        _ = reducer.reduce(
+            state: &state,
+            event: .topologyChanged(topology(externalDisplay: true, offset: 0.5)),
+            preferences: preferences
+        )
+        let postSettleEffects = reducer.reduce(
+            state: &state,
+            event: .topologyChanged(topology(externalDisplay: true, offset: 1)),
+            preferences: preferences
+        )
+        _ = reducer.reduce(
+            state: &state,
+            event: .wakePulseFailed(at: start.addingTimeInterval(1.1)),
+            preferences: preferences
+        )
+        let retryEffects = reducer.reduce(
+            state: &state,
+            event: .topologyChanged(topology(externalDisplay: true, offset: 1.5)),
+            preferences: preferences
+        )
+
+        XCTAssertEqual(postSettleEffects.filter(\.isWakePulse).count, 1)
+        XCTAssertEqual(retryEffects.filter(\.isWakePulse).count, 1)
+        XCTAssertTrue(closeContext(from: state).postSettleWakePulseIssued)
+    }
+
     func testACPowerLossRequestsStopOnlyWhenRequired() {
         var requiredState = runningState(mode: .agentDisplay, topology: topology(externalDisplay: true))
         var optionalState = requiredState
@@ -427,6 +517,53 @@ final class LidTransitionReducerTests: XCTestCase {
         }
 
         return DisplayTopology(observedAt: start.addingTimeInterval(offset), displays: displays)
+    }
+
+    private func topologyWithDummyAndPhysicalDisplay(
+        physicalDisplayActive: Bool,
+        offset: TimeInterval = 0
+    ) -> DisplayTopology {
+        DisplayTopology(
+            observedAt: start.addingTimeInterval(offset),
+            displays: [
+                DisplayDescriptor(
+                    id: 1,
+                    name: "Built-in Display",
+                    isBuiltIn: true,
+                    isOnline: true,
+                    isActive: true,
+                    isMain: false,
+                    isMirrored: false,
+                    width: 1_728,
+                    height: 1_117,
+                    scale: 2
+                ),
+                DisplayDescriptor(
+                    id: 2,
+                    name: "Dummy Display",
+                    isBuiltIn: false,
+                    isOnline: true,
+                    isActive: true,
+                    isMain: !physicalDisplayActive,
+                    isMirrored: false,
+                    width: 3_840,
+                    height: 2_160,
+                    scale: 2
+                ),
+                DisplayDescriptor(
+                    id: 3,
+                    name: "Physical Display",
+                    isBuiltIn: false,
+                    isOnline: true,
+                    isActive: physicalDisplayActive,
+                    isMain: physicalDisplayActive,
+                    isMirrored: false,
+                    width: 1_920,
+                    height: 1_280,
+                    scale: 1
+                )
+            ]
+        )
     }
 
     private func standardPreferences() -> LidTransitionPreferences {

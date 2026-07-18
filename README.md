@@ -99,7 +99,7 @@ pmset displaysleepnow
 
 The pre-close topology remains authoritative for the whole transition. A transient disconnect cannot authorize display sleep if an external display was present before or during the lid-close change.
 
-In Agent Display mode, Clolid never runs the automatic display-sleep command. When an external display is available at lid close or reconnects during settling, Clolid launches a separate, self-expiring wake pulse:
+In Agent Display mode, Clolid never runs the automatic display-sleep command. When an external display is available at lid close, Clolid launches a separate, self-expiring wake pulse and renews it once after the closed-lid topology stabilizes. When a display first reconnects during settling, Clolid launches one pulse:
 
 ```bash
 caffeinate -u -t 5
@@ -107,7 +107,7 @@ caffeinate -u -t 5
 
 The manual display-sleep command remains available in both modes and sleeps all displays.
 
-Agent Display readiness checks the session, `disablesleep`, the long-lived assertion, external-display activity, topology stability, power source, external input devices, and Screen Lock status. Clolid recognizes physical USB and Bluetooth keyboards, mice, and trackpads from IOKit HID metadata. A confirmed missing device blocks readiness. Incomplete metadata, unsupported transports, or IOKit enumeration failures remain advisories rather than being silently reported as present or absent.
+Agent Display readiness checks the session, `disablesleep`, the long-lived assertion, external-display activity, topology stability, power source, external input devices, and Screen Lock status. Clolid recognizes physical USB and Bluetooth keyboards, mice, and trackpads from static IOKit HID metadata without opening the devices or capturing input. A confirmed missing device blocks readiness. Incomplete metadata, unsupported transports, or IOKit enumeration failures remain advisories rather than being silently reported as present or absent.
 
 Clolid can also apply a session-scoped Screen Lock policy using `sysadminctl -screenLock`, which is the source that matches macOS Lock Screen settings on current macOS releases. The app asks for your Mac login password in a Clolid-styled prompt when a non-System Screen Lock policy is applied during a session, passes it to macOS for that command, and does not store it.
 

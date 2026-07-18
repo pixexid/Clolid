@@ -4,6 +4,7 @@ import ClolidRuntime
 import Combine
 import Foundation
 import IOKit
+import OSLog
 import SwiftUI
 import UserNotifications
 
@@ -183,6 +184,10 @@ private final class KeeperModel: ObservableObject {
     private let displayTopologyMonitor = CoreGraphicsDisplayTopologyMonitor()
     private let externalInputDeviceDetector = ExternalInputDeviceDetector()
     private let readinessEvaluator = AgentReadinessEvaluator()
+    private let readinessLogger = Logger(
+        subsystem: AppConstants.bundleIdentifier,
+        category: "readiness"
+    )
     private var isRefreshingScreenLockStatus = false
     private var lastScreenLockRefreshAt: Date?
     private var pollTimer: Timer?
@@ -817,7 +822,7 @@ private final class KeeperModel: ObservableObject {
             topologyStable = context.topologyStable
         }
 
-        agentReadiness = readinessEvaluator.evaluate(
+        let updatedReadiness = readinessEvaluator.evaluate(
             ReadinessInputs(
                 sessionMode: sessionMode,
                 sessionRunning: state.sessionRunning,
@@ -832,6 +837,13 @@ private final class KeeperModel: ObservableObject {
                 topologyStable: topologyStable
             )
         )
+        if updatedReadiness != agentReadiness {
+            let reasonCodes = updatedReadiness.reasons.map(\.code).joined(separator: ",")
+            readinessLogger.info(
+                "Readiness \(updatedReadiness.summary, privacy: .public): \(reasonCodes.isEmpty ? "none" : reasonCodes, privacy: .public)"
+            )
+        }
+        agentReadiness = updatedReadiness
     }
 
     private func shouldRefreshPowerSource() -> Bool {
