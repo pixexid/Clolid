@@ -97,6 +97,16 @@ public final class LidTransitionController {
         self.preferences = preferences
         invalidateScheduledRefreshes()
 
+        if mode.policy.supportsWakePulse,
+           preferences.wakePulseEnabled,
+           !wakePulseController.prepareRecoveryInputAccess() {
+            delegate?.lidTransitionController(
+                self,
+                runtimeActionDidFail: "Accessibility permission is required for closed-lid display recovery.",
+                state: state
+            )
+        }
+
         guard let topology = captureTopology(at: at) else {
             return false
         }
@@ -206,6 +216,17 @@ public final class LidTransitionController {
                 delegate?.lidTransitionController(
                     self,
                     runtimeActionDidFail: "Unable to wake the agent display: \(error.localizedDescription)",
+                    state: state
+                )
+            }
+
+        case .issueRecoveryWake(let duration):
+            do {
+                try wakePulseController.issueRecovery(duration: duration)
+            } catch {
+                delegate?.lidTransitionController(
+                    self,
+                    runtimeActionDidFail: "Unable to recover the agent display: \(error.localizedDescription)",
                     state: state
                 )
             }

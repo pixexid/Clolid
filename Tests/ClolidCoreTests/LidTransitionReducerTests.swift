@@ -399,6 +399,43 @@ final class LidTransitionReducerTests: XCTestCase {
         XCTAssertTrue(closeContext(from: state).postSettleWakePulseIssued)
     }
 
+    func testAgentModeIssuesOneRecoveryWakeWhenExternalDisplaysDropAfterSettling() {
+        let closeTopology = topology(externalDisplay: true)
+        var state = runningState(mode: .agentDisplay, topology: closeTopology)
+        let preferences = agentPreferences()
+
+        _ = reducer.reduce(
+            state: &state,
+            event: .lidClosed(topology: closeTopology, at: start),
+            preferences: preferences
+        )
+        _ = reducer.reduce(
+            state: &state,
+            event: .topologyChanged(topology(externalDisplay: true, offset: 0.5)),
+            preferences: preferences
+        )
+        _ = reducer.reduce(
+            state: &state,
+            event: .topologyChanged(topology(externalDisplay: true, offset: 1)),
+            preferences: preferences
+        )
+        let displayDropEffects = reducer.reduce(
+            state: &state,
+            event: .topologyChanged(topology(externalDisplay: false, offset: 1.5)),
+            preferences: preferences
+        )
+        let laterMissingEffects = reducer.reduce(
+            state: &state,
+            event: .topologyChanged(topology(externalDisplay: false, offset: 2)),
+            preferences: preferences
+        )
+
+        XCTAssertEqual(displayDropEffects.filter(\.isRecoveryWake).count, 1)
+        XCTAssertTrue(displayDropEffects.contains(.refreshTopology(after: 0.5)))
+        XCTAssertEqual(laterMissingEffects.filter(\.isRecoveryWake).count, 0)
+        XCTAssertTrue(closeContext(from: state).recoveryWakeIssued)
+    }
+
     func testACPowerLossRequestsStopOnlyWhenRequired() {
         var requiredState = runningState(mode: .agentDisplay, topology: topology(externalDisplay: true))
         var optionalState = requiredState
@@ -598,6 +635,13 @@ final class LidTransitionReducerTests: XCTestCase {
 private extension LidRuntimeEffect {
     var isWakePulse: Bool {
         if case .issueWakePulse = self {
+            return true
+        }
+        return false
+    }
+
+    var isRecoveryWake: Bool {
+        if case .issueRecoveryWake = self {
             return true
         }
         return false

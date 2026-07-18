@@ -999,7 +999,7 @@ extension KeeperModel: LidTransitionControllerDelegate {
                 event.message
             )
 
-        case .refreshTopology, .issueWakePulse:
+        case .refreshTopology, .issueWakePulse, .issueRecoveryWake:
             break
         }
     }

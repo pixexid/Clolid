@@ -32,6 +32,7 @@ The app is intentionally small: it wraps the system power tools needed for this 
 - macOS 13 or newer.
 - Xcode command line tools.
 - Administrator permission when starting or stopping a session, because Clolid changes `pmset disablesleep`.
+- Accessibility permission for Agent Display recovery input. Clolid posts only a one-pixel mouse move and restore when all external displays drop after lid close.
 
 ## Download
 
@@ -104,6 +105,8 @@ In Agent Display mode, Clolid never runs the automatic display-sleep command. Wh
 ```bash
 caffeinate -u -t 5
 ```
+
+If macOS still drops all external displays after settling, Clolid makes one recovery attempt. It starts the same bounded wake pulse, posts a one-pixel mouse move and restore through CoreGraphics, then verifies the topology again. This is intended to engage macOS desktop/clamshell mode without clicking, typing, or moving the pointer from its original position.
 
 The manual display-sleep command remains available in both modes and sleeps all displays.
 

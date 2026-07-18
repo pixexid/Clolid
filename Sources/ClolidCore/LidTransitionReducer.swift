@@ -67,6 +67,7 @@ public struct LidCloseContext: Equatable, Sendable {
     public internal(set) var automaticSleepIssued: Bool
     public internal(set) var wakePulseIssued: Bool
     public internal(set) var postSettleWakePulseIssued: Bool
+    public internal(set) var recoveryWakeIssued: Bool
     public internal(set) var missingDisplayWarningIssued: Bool
 
     init(
@@ -90,6 +91,7 @@ public struct LidCloseContext: Equatable, Sendable {
         self.automaticSleepIssued = false
         self.wakePulseIssued = false
         self.postSettleWakePulseIssued = false
+        self.recoveryWakeIssued = false
         self.missingDisplayWarningIssued = false
     }
 }
@@ -154,6 +156,7 @@ public enum LidRuntimeEffect: Equatable, Sendable {
     case refreshTopology(after: TimeInterval)
     case sleepAllDisplays
     case issueWakePulse(duration: TimeInterval)
+    case issueRecoveryWake(duration: TimeInterval)
     case publishReadiness
     case notifyOnce(code: String, title: String, body: String)
     case requestSessionStop(reason: String)
@@ -270,12 +273,24 @@ public struct LidTransitionReducer: Sendable {
                 return [.publishReadiness]
             case .settling(var context), .closed(var context):
                 let wakePulseHadBeenIssued = context.wakePulseIssued
+                let externalDisplayWasOnline = context.latestTopology.hasExternalOnlineDisplay
                 update(&context, with: topology)
                 var effects: [LidRuntimeEffect] = [.publishReadiness]
 
                 if shouldIssueWakePulse(context: context, mode: state.sessionMode, preferences: preferences) {
                     context.wakePulseIssued = true
                     effects.append(.issueWakePulse(duration: configuration.wakePulseDuration))
+                }
+
+                if shouldIssueRecoveryWake(
+                    context: context,
+                    externalDisplayWasOnline: externalDisplayWasOnline,
+                    mode: state.sessionMode,
+                    preferences: preferences
+                ) {
+                    context.recoveryWakeIssued = true
+                    effects.append(.issueRecoveryWake(duration: configuration.wakePulseDuration))
+                    effects.append(.refreshTopology(after: configuration.sampleInterval))
                 }
 
                 appendMissingDisplayWarningIfNeeded(
@@ -388,6 +403,21 @@ public struct LidTransitionReducer: Sendable {
             && !context.postSettleWakePulseIssued
             && context.topologyStable
             && context.latestTopology.hasExternalOnlineDisplay
+    }
+
+    private func shouldIssueRecoveryWake(
+        context: LidCloseContext,
+        externalDisplayWasOnline: Bool,
+        mode: SessionMode,
+        preferences: LidTransitionPreferences
+    ) -> Bool {
+        mode.policy.supportsWakePulse
+            && preferences.wakePulseEnabled
+            && context.externalDisplayAvailableAtClose
+            && context.wakePulseIssued
+            && externalDisplayWasOnline
+            && !context.latestTopology.hasExternalOnlineDisplay
+            && !context.recoveryWakeIssued
     }
 
     private func resetFailedWakePulse(in context: inout LidCloseContext) {

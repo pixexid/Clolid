@@ -150,6 +150,74 @@ final class LidTransitionControllerTests: XCTestCase {
         XCTAssertEqual(wakePulse.durations, [5, 5])
     }
 
+    func testAgentDisplayDropIssuesRecoveryWakeAndSchedulesVerification() {
+        let provider = FakeTopologyProvider(
+            results: [
+                .success(topology(externalActive: true, offset: 0)),
+                .success(topology(externalActive: true, offset: 0.5)),
+                .success(topology(externalActive: true, offset: 1)),
+                .success(topology(externalActive: false, offset: 1.5)),
+                .success(topology(externalActive: false, offset: 2))
+            ]
+        )
+        let wakePulse = FakeWakePulseController()
+        let scheduler = FakeTransitionScheduler()
+        let controller = makeController(
+            provider: provider,
+            wakePulse: wakePulse,
+            scheduler: scheduler
+        )
+
+        XCTAssertTrue(
+            controller.start(
+                mode: .agentDisplay,
+                lidClosed: true,
+                isOnACPower: true,
+                preferences: agentPreferences(),
+                at: start
+            )
+        )
+        scheduler.runNext()
+        scheduler.runNext()
+        controller.refreshTopology(
+            preferences: agentPreferences(),
+            at: start.addingTimeInterval(1.5)
+        )
+
+        XCTAssertEqual(wakePulse.recoveryDurations, [5])
+        XCTAssertEqual(scheduler.pendingCount, 1)
+
+        scheduler.runNext()
+
+        XCTAssertEqual(wakePulse.recoveryDurations, [5])
+        XCTAssertEqual(provider.captureCount, 5)
+    }
+
+    func testAgentStartReportsMissingRecoveryInputAccess() {
+        let provider = FakeTopologyProvider(
+            results: [.success(topology(externalActive: true))]
+        )
+        let wakePulse = FakeWakePulseController(recoveryInputAccessGranted: false)
+        let delegate = FakeTransitionDelegate()
+        let controller = makeController(provider: provider, wakePulse: wakePulse)
+        controller.delegate = delegate
+
+        XCTAssertTrue(
+            controller.start(
+                mode: .agentDisplay,
+                lidClosed: false,
+                isOnACPower: true,
+                preferences: agentPreferences(),
+                at: start
+            )
+        )
+
+        XCTAssertEqual(
+            delegate.runtimeFailures,
+            ["Accessibility permission is required for closed-lid display recovery."]
+        )
+    }
+
     func testModeUpdateChangesPolicyWithoutResettingCloseContext() {
         let provider = FakeTopologyProvider(results: [.success(topology(externalActive: true))])
         let wakePulse = FakeWakePulseController()
@@ -306,11 +374,21 @@ private final class FakeTopologyProvider: DisplayTopologyProviding {
 
 private final class FakeWakePulseController: WakePulseControlling {
     private(set) var durations: [TimeInterval] = []
+    private(set) var recoveryDurations: [TimeInterval] = []
     private(set) var isRunning = false
     private var failuresRemaining: Int
+    private let recoveryInputAccessGranted: Bool
 
-    init(failuresRemaining: Int = 0) {
+    init(
+        failuresRemaining: Int = 0,
+        recoveryInputAccessGranted: Bool = true
+    ) {
         self.failuresRemaining = failuresRemaining
+        self.recoveryInputAccessGranted = recoveryInputAccessGranted
+    }
+
+    func prepareRecoveryInputAccess() -> Bool {
+        recoveryInputAccessGranted
     }
 
     func issue(duration: TimeInterval) throws {
@@ -319,6 +397,11 @@ private final class FakeWakePulseController: WakePulseControlling {
             failuresRemaining -= 1
             throw FakeWakePulseError.failed
         }
+        isRunning = true
+    }
+
+    func issueRecovery(duration: TimeInterval) throws {
+        recoveryDurations.append(duration)
         isRunning = true
     }
 
@@ -346,6 +429,11 @@ private final class FakeScheduledTransition: ScheduledTransition {
 
 private final class FakeTransitionScheduler: LidTransitionScheduling {
     private(set) var tasks: [FakeScheduledTransition] = []
+    private var nextTaskIndex = 0
+
+    var pendingCount: Int {
+        tasks[nextTaskIndex...].filter { !$0.isCancelled }.count
+    }
 
     func schedule(
         after delay: TimeInterval,
@@ -358,6 +446,17 @@ private final class FakeTransitionScheduler: LidTransitionScheduling {
 
     func fireAllIgnoringCancellation() {
         tasks.forEach { $0.action() }
+    }
+
+    func runNext() {
+        while nextTaskIndex < tasks.count {
+            let task = tasks[nextTaskIndex]
+            nextTaskIndex += 1
+            if !task.isCancelled {
+                task.action()
+                return
+            }
+        }
     }
 }
 

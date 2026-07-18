@@ -52,6 +52,49 @@ final class WakePulseControllerTests: XCTestCase {
         XCTAssertFalse(controller.isRunning)
         XCTAssertEqual(events.values, ["launch 101 -u -t 5", "terminate 101"])
     }
+
+    func testPrepareRecoveryInputRequestsPostingAccess() {
+        let events = WakeEventLog()
+        let launcher = WakeFakeLauncher(processIDs: [], events: events)
+        let inputPoster = WakeFakeRecoveryInputPoster(events: events)
+        let controller = WakePulseController(
+            launcher: launcher,
+            recoveryInputPoster: inputPoster
+        )
+
+        XCTAssertTrue(controller.prepareRecoveryInputAccess())
+        XCTAssertEqual(events.values, ["request input access"])
+    }
+
+    func testRecoveryPulseStartsAssertionThenPostsInputNudge() throws {
+        let events = WakeEventLog()
+        let launcher = WakeFakeLauncher(processIDs: [101], events: events)
+        let inputPoster = WakeFakeRecoveryInputPoster(events: events)
+        let controller = WakePulseController(
+            launcher: launcher,
+            recoveryInputPoster: inputPoster
+        )
+
+        try controller.issueRecovery(duration: 5)
+
+        XCTAssertTrue(controller.isRunning)
+        XCTAssertEqual(events.values, ["launch 101 -u -t 5", "post input nudge"])
+    }
+
+    func testFailedRecoveryInputLeavesWakeAssertionRunning() {
+        let events = WakeEventLog()
+        let launcher = WakeFakeLauncher(processIDs: [101], events: events)
+        let inputPoster = WakeFakeRecoveryInputPoster(events: events, postFails: true)
+        let controller = WakePulseController(
+            launcher: launcher,
+            recoveryInputPoster: inputPoster
+        )
+
+        XCTAssertThrowsError(try controller.issueRecovery(duration: 5))
+
+        XCTAssertTrue(controller.isRunning)
+        XCTAssertEqual(events.values, ["launch 101 -u -t 5", "post input failed"])
+    }
 }
 
 private final class WakeEventLog {
@@ -76,6 +119,33 @@ private final class WakeFakeProcess: ManagedAssertionProcess {
 
 private enum WakeFakeLauncherError: Error {
     case failed
+}
+
+private enum WakeFakeRecoveryInputError: Error {
+    case failed
+}
+
+private final class WakeFakeRecoveryInputPoster: RecoveryInputPosting {
+    private let events: WakeEventLog
+    private let postFails: Bool
+
+    init(events: WakeEventLog, postFails: Bool = false) {
+        self.events = events
+        self.postFails = postFails
+    }
+
+    func requestAccess() -> Bool {
+        events.values.append("request input access")
+        return true
+    }
+
+    func postNudge() throws {
+        if postFails {
+            events.values.append("post input failed")
+            throw WakeFakeRecoveryInputError.failed
+        }
+        events.values.append("post input nudge")
+    }
 }
 
 private final class WakeFakeLauncher: AssertionProcessLaunching {
